@@ -1,203 +1,249 @@
-#include "main.h"
-#include <stdint.h>
-#include <stddef.h>
-#define SOLENOID	GPIO_PIN_6		// Pin B6
-#define S_PORT     GPIOB
-#define FIFO_SIZE 601 // size of longest track
-#define LENGTH1 60
-#define LENGTH2 39
+	#include "main.h"
+	#include <stdint.h>
+	#include <stddef.h>
+	#include <stdio.h>
+	#include <string.h>
+	#include "Timer.h"
 
-// #define FifoTrackOneSize 601 // 69 for track one and \0--> null terminator  |  60 bits time 7 is 600
-// #define FifoTrackTwoSize 391 // 30 for track 2 plus \0--> null terminator  |  39 bits time 7 is 390
+	#define SOLENOID	GPIO_PIN_6		// Pin B6
+	#define S_PORT     GPIOB
+	#define FIFO_SIZE 100 // size of longest track
+	#define LENGTH1 60
+	#define LENGTH2 39
 
-#define NUM_FIFOS 2
+	// #define FifoTrackOneSize 601 // 69 for track one and \0--> null terminator  |  60 bits time 7 is 600
+	// #define FifoTrackTwoSize 391 // 30 for track 2 plus \0--> null terminator  |  39 bits time 7 is 390
 
-int coil_polarity = 0;
+	#define NUM_FIFOS 2
 
-TIM_HandleTypeDef htim2;
+	int coil_polarity = 0;
 
-UART_HandleTypeDef huart2;
-UART_HandleTypeDef huart3;
+	TIM_HandleTypeDef htim2;
 
-//for FIFO use
-char Buffer[1];
-unsigned short flags;
-char *Putpt; // FIFO Put pointer
-char *Getpt; // FIFO Get pointer
+	UART_HandleTypeDef huart2;
+	UART_HandleTypeDef huart3;
 
-char* Putpts[NUM_FIFOS];
-char* Getpts[NUM_FIFOS];
+	//for FIFO use
+	char Buffer[1];
+	unsigned short flags;
 
-char* Fifos[NUM_FIFOS][FIFO_SIZE];
+	volatile char* Putpts[NUM_FIFOS];
+	volatile char* Getpts[NUM_FIFOS];
 
-void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_TIM2_Init(void);
-static void MX_USART2_UART_Init(void);  
-static void MX_USART3_UART_Init(void);
-//%B1234567890123456^DOE/JOHN           ^25051234567890000000?  <-- track 1 example
-//;1234567890123456=25051234567890000000? <-- track 2 example
+	volatile char Fifos[NUM_FIFOS][FIFO_SIZE];
 
-// only ASCII 0x20–0x7F are used on Track 1; adjust size if you need more
-static const uint8_t track1_lut[128] = {
-    [' '] = 0x40,
-    ['!'] = 0x01, ['"'] = 0x02, ['#'] = 0x43, ['$'] = 0x04,
-    ['%'] = 0x45, ['&'] = 0x46, ['\'']= 0x07, ['('] = 0x08,
-    [')'] = 0x49, ['*'] = 0x4A, ['+'] = 0x0B, [','] = 0x4C,
-    ['-'] = 0x0D, ['.'] = 0x0E, ['/'] = 0x4F,
-    ['0'] =   , ['1'] = 0x51, ['2'] = 0x52, ['3'] = 0x13,
-    ['4'] = 0x54, ['5'] = 0x15, ['6'] = 0x16, ['7'] = 0x57,
-    ['8'] = 0x58, ['9'] = 0x19,
-    [':'] = 0x1A, [';'] = 0x5B, ['<'] = 0x1C, ['='] = 0x5D,
-    ['>'] = 0x5E, ['?'] = 0x1F, ['@'] = 0x20,
-    ['A'] = 0x61, ['B'] = 0x62, ['C'] = 0x23, ['D'] = 0x64,
-    ['E'] = 0x25, ['F'] = 0x26, ['G'] = 0x67, ['H'] = 0x68,
-    ['I'] = 0x29, ['J'] = 0x2A, ['K'] = 0x6B, ['L'] = 0x2C,
-    ['M'] = 0x6D, ['N'] = 0x6E, ['O'] = 0x2F, ['P'] = 0x70,
-    ['Q'] = 0x31, ['R'] = 0x32, ['S'] = 0x73, ['T'] = 0x34,
-    ['U'] = 0x75, ['V'] = 0x76, ['W'] = 0x37, ['X'] = 0x38,
-    ['Y'] = 0x79, ['Z'] = 0x7A, ['['] = 0x3B, ['\\']= 0x7C,
-    [']'] = 0x3D, ['^'] = 0x3E, ['_'] = 0x7F,
-    // everything else defaults to 0x00 (you can treat that as "invalid")
-};
+	void SystemClock_Config(void);
+	static void MX_GPIO_Init(void);
+	static void MX_TIM2_Init(void);
+	static void MX_USART2_UART_Init(void);
+	static void MX_USART3_UART_Init(void);
+	//%B1234567890123456^DOE/JOHN           ^25051234567890000000?  <-- track 1 example
+	//;1234567890123456=25051234567890000000? <-- track 2 example
 
-static const uint8_t track2_lut[128] = {
-    ['0'] = 0x10,  // data=0x0, parity=1
-    ['1'] = 0x01,  // data=0x1, parity=0
-    ['2'] = 0x02,  // data=0x2, parity=0
-    ['3'] = 0x13,  // data=0x3, parity=1
-    ['4'] = 0x04,  // data=0x4, parity=0
-    ['5'] = 0x15,  // data=0x5, parity=1
-    ['6'] = 0x16,  // data=0x6, parity=1
-    ['7'] = 0x07,  // data=0x7, parity=0
-    ['8'] = 0x08,  // data=0x8, parity=0
-    ['9'] = 0x19,  // data=0x9, parity=1
-    [';'] = 0x0B,  // start sentinel, data=0xB, parity=0
-    ['='] = 0x0D,  // field separator, data=0xD, parity=0
-    ['?'] = 0x1F,  // end sentinel, data=0xF, parity=1
-    // everything else = 0x00 (invalid)
-};
+	// only ASCII 0x20–0x7F are used on Track 1; adjust size if you need more
+	static const uint8_t track1_lut[128] = {
+		[' '] = 0x40,
+		['!'] = 0x01, ['"'] = 0x02, ['#'] = 0x43, ['$'] = 0x04,
+		['%'] = 0x45, ['&'] = 0x46, ['\'']= 0x07, ['('] = 0x08,
+		[')'] = 0x49, ['*'] = 0x4A, ['+'] = 0x0B, [','] = 0x4C,
+		['-'] = 0x0D, ['.'] = 0x0E, ['/'] = 0x4F,
+		['0'] = 0x10, ['1'] = 0x51, ['2'] = 0x52, ['3'] = 0x13,
+		['4'] = 0x54, ['5'] = 0x15, ['6'] = 0x16, ['7'] = 0x57,
+		['8'] = 0x58, ['9'] = 0x19,
+		[':'] = 0x1A, [';'] = 0x5B, ['<'] = 0x1C, ['='] = 0x5D,
+		['>'] = 0x5E, ['?'] = 0x1F, ['@'] = 0x20,
+		['A'] = 0x61, ['B'] = 0x62, ['C'] = 0x23, ['D'] = 0x64,
+		['E'] = 0x25, ['F'] = 0x26, ['G'] = 0x67, ['H'] = 0x68,
+		['I'] = 0x29, ['J'] = 0x2A, ['K'] = 0x6B, ['L'] = 0x2C,
+		['M'] = 0x6D, ['N'] = 0x6E, ['O'] = 0x2F, ['P'] = 0x70,
+		['Q'] = 0x31, ['R'] = 0x32, ['S'] = 0x73, ['T'] = 0x34,
+		['U'] = 0x75, ['V'] = 0x76, ['W'] = 0x37, ['X'] = 0x38,
+		['Y'] = 0x79, ['Z'] = 0x7A, ['['] = 0x3B, ['\\']= 0x7C,
+		[']'] = 0x3D, ['^'] = 0x3E, ['_'] = 0x7F
+		// everything else defaults to 0x00 (you can treat that as "invalid")
+	};
+
+	// Track-2 reversed‐bit LUT: ASCII → bit-reversed 5-bit code
+	static const uint8_t track2_lut[128] = {
+	    ['0'] = 0x01,  // orig 0x10 (10000b) → rev 00001b
+	    ['1'] = 0x10,  // orig 0x01 (00001b) → rev 10000b
+	    ['2'] = 0x08,  // orig 0x02 (00010b) → rev 01000b
+	    ['3'] = 0x19,  // orig 0x13 (10011b) → rev 11001b
+	    ['4'] = 0x04,  // orig 0x04 (00100b) → rev 00100b
+	    ['5'] = 0x15,  // orig 0x15 (10101b) → rev 10101b
+	    ['6'] = 0x0D,  // orig 0x16 (10110b) → rev 01101b
+	    ['7'] = 0x1C,  // orig 0x07 (00111b) → rev 11100b
+	    ['8'] = 0x02,  // orig 0x08 (01000b) → rev 00010b
+	    ['9'] = 0x13,  // orig 0x19 (11001b) → rev 10011b
+
+	    [';'] = 0x1A,  // orig 0x0B (01011b) → rev 11010b
+	    ['='] = 0x16,  // orig 0x0D (01101b) → rev 10110b
+	    ['?'] = 0x1F,  // orig 0x1F (11111b) → rev 11111b (palindrome)
+
+	    // everything else = 0x00 (invalid)
+	};
+
+	void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+	{
+		TIMER2_HANDLE();
+	}
+
+	void reverse_string(char *input) {
+		int len = strlen(input);
+		for (int i = 0; i < len/2; i++) {
+			char temp = input[i];
+			input[i] = input[len - 1-i];
+			input[len - 1-i] = temp;
+		}
+	}
 
 
-void toggle_coil_polarity() {
-  coil_polarity = !coil_polarity;
-  HAL_GPIO_WritePin(S_PORT, SOLENOID, coil_polarity ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
+	void toggle_coil_polarity() {
+	  coil_polarity = !coil_polarity;
+	  HAL_GPIO_WritePin(S_PORT, SOLENOID, coil_polarity ? GPIO_PIN_SET : GPIO_PIN_RESET);
+	}
 
-void send_one() {
-  toggle_coil_polarity();
-  // schedule to toggle at half_way of timer
-  sTimer[HALF_BLOCK] = HALF_BLOCK_TIME;
-  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME;
-}
+	void send_one() {
+	  toggle_coil_polarity();
+	  // schedule to toggle at half_way of timer
+	  sTimer[HALF_BLOCK] = HALF_BLOCK_TIME;
+	  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME;
+	}
 
-void send_zero() {
-  toggle_coil_polarity();
-  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME;
-}
+	void send_zero() {
+	  toggle_coil_polarity();
+	  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME;
+	}
 
-void send_track(int index) {
-  while (!FifoIsEmpty(index)) {
-    if (sTimer[HALF_BLOCK] == 0) {
-      toggle_coil_polarity();
-    }
-    
-    if (sTimer[FULL_BLOCK] == 0) {
-      if (GetFifo(0, Buffer) == 0) {
-        send_zero();
-      } else {
-        send_one();
-      }
-    }
-  }
-}
-//iterating through each character and then for each character 7 bits (disregard the MSB)
-void load_track_one(char* track, int length) {
-  char temp[FIFO_SIZE];
-  for (int i = 0;  i < length;  i++) {2
-    temp[k]=track1_lut[track[k]];
-  }
+	void send_track(int index) {
+	  while (!FifoIsEmpty(index)) {
+		if (sTimer[HALF_BLOCK] == 0) {
+		  toggle_coil_polarity();
+		}
 
-  for (int i = 0;  i < length;  i++) {
-    for (int j = 0; j < 7; j++) {
-      putFifo(0, (track[i] >> j) & 1);
-    }
-  }
-}
+		if (sTimer[FULL_BLOCK] == 0) {
+		  GetFifo(index, Buffer);
+		  if (Buffer[0] == 0) {
+			send_zero();
+		  } else {
+			send_one();
+		  }
+		}
+	  }
+	}
 
-void load_track_two(char* track, int length) {
-  char temp[FIFO_SIZE];
-  for (int k = 0; k < length; k++) {
-    // Convert to BYTE mapping of characters for magnetic tracks (from ASCII)
-    temp[k] = track2_lut[track[k]];
-  }
+	//iterating through each character and then for each character 7 bits (disregard the MSB)
+	void load_track_one(char* track, int length) {
+	  char t1[FIFO_SIZE];
+	  t1[0] = track1_lut['%'];
 
-  // Queue each bit of the converted BYTEs in the 
-  for (int i = 0;  i < length;  i++) {
-      for (int j = 0; j < 5; j++) {
-        putFifo(0, (temp[i] >> j) & 1);
-      }
-  } 
-}
+	  for (int k = 1;  k < length;  k++) {
+		t1[k]=track1_lut[track[k]];
+	  }
 
-void FifoInit(int index){
-  Putpt[index] = Getpt[index] = &Fifos[index][0];
-}
+	  // Send end sentinel
+	  t1[length] = track1_lut['?'];
 
-int GetFifo(int index, char *dataPt){
-  if (Putpt[index] == Getpt[index])
-    return 0; // Fifo empty
-  else{
-    *dataPt[index] = *(Getpt[index])++; // post increment after assignment
-    if (Getpt[index] == &Fifos[index][FIFO_SIZE])
-      Getpt[index] = Fifos[index];
-      return -1; // successfully
-  }
-}
+	  for (int i = 0;  i <= length;  i++) {
+		for (int j = 0; j < 7; j++) {
+		  PutFifo(0, (t1[i] >> j) & 1);
+		}
+	  }
+	}
 
-int FifoIsEmpty(int index) {
-  return !(Putpt[index] == Getpt[index]);
-}
+	void load_track_two(char* track, int length) {
+	  char t2[FIFO_SIZE];
+	  //starting sentinal
+	  t2[0] = track2_lut[';'];
+	  for (int k = 1; k < length; k++) {
+		// Convert to BYTE mapping of characters for magnetic tracks (from ASCII)
+		t2[k] = track2_lut[track[k]];
+	  }
+	  //ending sentinal
+	  t2[length] = track2_lut['?'];
+	  // Queue each bit of the converted BYTEs in the
+	  for (int i = 0;  i <= length;  i++) {
+		  for (int j = 0; j < 5; j++) {
+			PutFifo(1, (t2[i] >> j) & 1);
+		  }
+	  }
+	}
 
-int PutFifo(int index, char data){
-  char *Ppt; // Put pointer temporary use
-  Ppt = Putpt[index]; // Save a copy of Putpt
-  *Ppt++ = data; // Put into Fifo
-  //HAL_UART_Transmit(&huart2, (uint8_t *)(Ppt-1), 1, HAL_MAX_DELAY); // echo the rec'd char
-  //HAL_UART_Transmit(&huart2, (uint8_t *)"\n\r", 2, HAL_MAX_DELAY);
-  if (Ppt == &Fifos[index][FIFO_SIZE])
-    Ppt = &Fifo[0]; // wrap to Fifo top
-  if (Ppt == Getpt[index]){
-    //HAL_UART_Transmit(&huart2, (uint8_t *)"Received but FIFO full!\n\r",25, HAL_MAX_DELAY);
-    return 0;
-  }else{
-    Putpt[index] = Ppt;
-    //HAL_UART_Transmit(&huart2, (uint8_t *)"Received OK.\n\r", 15, HAL_MAX_DELAY);
-    return -1; // successfully
-  }
-}
+	void FifoInit(int index){
+	  Putpts[index] = Getpts[index] = &Fifos[index][0];
+	}
 
-int main(void)
-{
+	int GetFifo(int index, char *dataPt){
+	  if (Putpts[index] == Getpts[index])
+		return 0; // Fifo empty
+	  else{
+		*dataPt = *Getpts[index]++; // post increment after assignment
+		if (Getpts[index] == &Fifos[index][FIFO_SIZE])
+		  Getpts[index] = Fifos[index];
+		  return -1; // successfully
+	  }
+	}
 
-  HAL_Init();
+	int FifoIsEmpty(int index) {
+	  return (Putpts[index] == Getpts[index]);
+	}
 
-  SystemClock_Config();
-  MX_GPIO_Init();
-  MX_TIM2_Init();
-  MX_USART2_UART_Init();
-  MX_USART3_UART_Init();
+	int PutFifo(int index, char data){
+	  char *Ppt; // Put pointer temporary use
+	  Ppt = Putpts[index]; // Save a copy of Putpt
+	  *Ppt++ = data; // Put into Fifo
+	  //HAL_UART_Transmit(&huart2, (uint8_t *)(Ppt-1), 1, HAL_MAX_DELAY); // echo the rec'd char
+	  //HAL_UART_Transmit(&huart2, (uint8_t *)"\n\r", 2, HAL_MAX_DELAY);
+	  if (Ppt == &Fifos[index][FIFO_SIZE])
+		Ppt = &Fifos[index][0]; // wrap to Fifo top
+	  if (Ppt == Getpts[index]){
+		//HAL_UART_Transmit(&huart2, (uint8_t *)"Received but FIFO full!\n\r",25, HAL_MAX_DELAY);
+		return 0;
+	  }else{
+		Putpts[index] = Ppt;
+		//HAL_UART_Transmit(&huart2, (uint8_t *)"Received OK.\n\r", 15, HAL_MAX_DELAY);
+		return -1; // successfully
+	  }
+	}
 
-  while (1)
-  {
-	  HAL_Delay(10);
-	  HAL_GPIO_WritePin(GPIOB, SOLENOID, 1);
-	  HAL_Delay(10);
-	  HAL_GPIO_WritePin(GPIOB, SOLENOID, 0);
+	int main(void)
+	{
 
-  }
-  /* USER CODE END 3 */
-}
+	  HAL_Init();
+
+	  SystemClock_Config();
+	  MX_GPIO_Init();
+	  MX_TIM2_Init();
+	  MX_USART2_UART_Init();
+	  MX_USART3_UART_Init();
+
+	  HAL_TIM_Base_Start_IT(&htim2);  // Start timer 2 interrupt
+
+	  FifoInit(0);
+	  FifoInit(1);
+
+	  char* track1 = "%B1234567890123456^DOE/JOHN ^25051234567890000000?";
+	  char track2[FIFO_SIZE];
+
+	  strcpy(track2, ";1234567890123456=25051234567890000000?");
+
+	  reverse_string(track2);
+
+	  while (1)
+	  {
+	//    HAL_Delay(3000);
+	//    toggle_coil_polarity();
+		HAL_Delay(5000);
+		load_track_one(track1, strlen(track1));
+		send_track(0);
+		//load_track_two(track2, strlen(track2));
+		//send_track(1);
+
+	  }
+	  /* USER CODE END 3 */
+	}
+
+
 
 /**
   * @brief System Clock Configuration
