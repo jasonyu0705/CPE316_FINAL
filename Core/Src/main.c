@@ -64,7 +64,7 @@
 	};
 
 	// Track-2 reversed‐bit LUT: ASCII → bit-reversed 5-bit code
-	static const uint8_t track2_lut[128] = {
+	static const uint8_t track2_lut_rev[128] = {
 	    ['0'] = 0x01,  // orig 0x10 (10000b) → rev 00001b
 	    ['1'] = 0x10,  // orig 0x01 (00001b) → rev 10000b
 	    ['2'] = 0x08,  // orig 0x02 (00010b) → rev 01000b
@@ -81,6 +81,26 @@
 	    ['?'] = 0x1F,  // orig 0x1F (11111b) → rev 11111b (palindrome)
 
 	    // everything else = 0x00 (invalid)
+	};
+
+	// Track-2 original LUT: ASCII → 5-bit code (not bit-reversed)
+	static const uint8_t track2_lut[128] = {
+		['0'] = 0x10,  // 10000b
+		['1'] = 0x01,  // 00001b
+		['2'] = 0x02,  // 00010b
+		['3'] = 0x13,  // 10011b
+		['4'] = 0x04,  // 00100b
+		['5'] = 0x15,  // 10101b
+		['6'] = 0x16,  // 10110b
+		['7'] = 0x07,  // 00111b
+		['8'] = 0x08,  // 01000b
+		['9'] = 0x19,  // 11001b
+
+		[';'] = 0x0B,  // 01011b (Start sentinel)
+		['='] = 0x0D,  // 01101b (Field separator)
+		['?'] = 0x1F,  // 11111b (End sentinel)
+
+		// everything else = 0x00 (invalid or undefined)
 	};
 
 	void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -127,12 +147,8 @@
 	}
 
 	void send_track(int index) {
-	  //send_zero(1);
+
 	  while (!FifoIsEmpty(index)) {
-//		if (sTimer[HALF_BLOCK] == 0) {
-//		  toggle_coil_polarity();
-//		  sTimer[HALF_BLOCK] = -1;
-//		}
 
 		if (sTimer[FULL_BLOCK] == 0) {
 		  GetFifo(index, Buffer);
@@ -190,67 +206,55 @@
 	  }
 	}
 
-#include <stdint.h>
-
-// Assume these lookup tables already exist in your code:
-extern const uint8_t track1_lut[128];  // full 7-bit codes
-extern const uint8_t track2_lut[128];  // full 5-bit codes
-
-// Reverse-lookup: given a full code, what 6 or 4 data bits does it contain?
-static inline uint8_t track1_data(uint8_t code) { return code & 0x3F; }
-static inline uint8_t track2_data(uint8_t code) { return code & 0x0F; }
-
-// --- Track 2 LRC (4 data bits + 1 parity) ---
-uint8_t calcTrack2LRC(const char *frame) {
-    // 1) Compute column parities P[0..3]
+// --- Track 2 (5-bit codes: 4 data bits + 1 parity) ---
+size_t appendTrack2LRC(uint8_t *codes, size_t length) {
+    // 1) XOR-fold the 4 data-bit columns
     uint8_t P[4] = {0,0,0,0};
-    for (; *frame; ++frame) {
-        uint8_t data = track2_data(track2_lut[(uint8_t)*frame]);
+    for (size_t i = 0; i < length; i++) {
+        uint8_t data = codes[i] & 0x0F;         // lower 4 bits = data
         for (int j = 0; j < 4; j++)
             P[j] ^= (data >> j) & 1;
     }
-    // 2) Choose LRC data bits to force odd parity per column
+    // 2) Pick LRC data bits so each column has odd parity
     uint8_t lrc_data = 0;
     for (int j = 0; j < 4; j++)
-        if ((P[j] ^ 1) & 1)        // need a ‘1’ to make (P[j]⊕D[j])==1
+        if ((P[j] ^ 1) & 1)
             lrc_data |= (1 << j);
 
-    // 3) Compute the LRC parity bit (so its own 5 bits have odd ones)
+    // 3) Compute LRC’s own parity bit (so its 5 bits are odd)
     int ones = __builtin_popcount(lrc_data);
     uint8_t p = (ones % 2 == 0) ? 1 : 0;
 
-    // 4) Return the full 5-bit code (parity in bit-4)
-    return (p << 4) | lrc_data;
+    // 4) Form the full 5-bit code and append
+    uint8_t lrc_code = (p << 4) | lrc_data;
+    codes[length] = lrc_code;
+    return length + 1;
 }
 
-// --- Track 1 LRC (6 data bits + 1 parity) ---
-uint8_t calcTrack1LRC(const char *frame) {
-    // 1) Compute column parities P[0..5]
+// --- Track 1 (7-bit codes: 6 data bits + 1 parity) ---
+size_t appendTrack1LRC(uint8_t *codes, size_t length) {
+    // 1) XOR-fold the 6 data-bit columns
     uint8_t P[6] = {0,0,0,0,0,0};
-    for (; *frame; ++frame) {
-        uint8_t data = track1_data(track1_lut[(uint8_t)*frame]);
+    for (size_t i = 0; i < length; i++) {
+        uint8_t data = codes[i] & 0x3F;         // lower 6 bits = data
         for (int j = 0; j < 6; j++)
             P[j] ^= (data >> j) & 1;
     }
-    // 2) Choose LRC data bits to force odd parity per column
+    // 2) Pick LRC data bits so each column has odd parity
     uint8_t lrc_data = 0;
     for (int j = 0; j < 6; j++)
         if ((P[j] ^ 1) & 1)
             lrc_data |= (1 << j);
 
-    // 3) Compute the LRC parity bit (so its own 7 bits have odd ones)
+    // 3) Compute LRC’s own parity bit (so its 7 bits are odd)
     int ones = __builtin_popcount(lrc_data);
     uint8_t p = (ones % 2 == 0) ? 1 : 0;
 
-    // 4) Return the full 7-bit code (parity in bit-6)
-    return (p << 6) | lrc_data;
+    // 4) Form the full 7-bit code and append
+    uint8_t lrc_code = (p << 6) | lrc_data;
+    codes[length] = lrc_code;
+    return length + 1;
 }
-
-
-
-
-
-
 
 	void FifoInit(int index){
 	  Putpts[index] = Getpts[index] = &Fifos[index][0];
@@ -305,25 +309,39 @@ uint8_t calcTrack1LRC(const char *frame) {
 	  FifoInit(0);
 	  FifoInit(1);
 
+	  #define track1_ascii_str	"%7001112000009182^VABALAS/DOVYDAS^000000000000?"
+	  #define track2_ascii_str	";7001112000009182=24127990000000000000?"
+	  
+	  int track1_ascii_strlen = strlen(track1_ascii_str);
+	  int track1_ascii_strlen = strlen(track2_ascii_str);
+
+	  
 	  //char* track1 = "B1234567890123456^DOE/JOHN ^25051234567890000000";
-	  char* track1 = "%7001112000009182^VABALAS/DOVYDAS^000000000000?";
-	  char track2[FIFO_SIZE];
+	  //char* track1 = "%7001112000009182^VABALAS/DOVYDAS^000000000000?";
+	
+	  char track1_ascii[FIFO_SIZE];
+	  char track2_ascii[FIFO_SIZE];
+	  
+	  strcpy(track1_ascii, track1_ascii_str);
+	  strcpy(track2_ascii, track2_ascii_str);
 
-	  strcpy(track2, ";7001112000009182=24127990000000000000?");
-
-	  reverse_string(track2);
-
+	  // converting tracks to bytes
+	  char track1_converted = convert_track_one(track1_ascii, track1_ascii_strlen);
+	  char track2_converted = convert_track_two(track2_ascii,track1_ascii_strlen);
+	  
+	  int track1_converted_len = appendTrack1LRC(track1_converted, track1_ascii_strlen);
+	  int track2_converted_len= appendTrack2LRC(track2_converted,track2_ascii_strlen);
+		
+	  load_track_one(track1_converted, track1_converted_len);
+	  load_track_two(track2_converted, track2_converted_len);
+	  
 	  while (1)
 	  {
-	//    HAL_Delay(3000);
-	//    toggle_coil_polarity();
+		
 		HAL_Delay(5000);
 		send_zeros(25);
-		load_track_one(track1, strlen(track1));
 		send_track(0);
 		send_zeros(53);
-		//HAL_Delay(100);
-		load_track_two(track2, strlen(track2));
 		send_track(1);
 		send_zeros(25);
 
