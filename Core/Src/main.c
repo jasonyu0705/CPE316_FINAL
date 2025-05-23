@@ -103,71 +103,154 @@
 	  HAL_GPIO_WritePin(S_PORT, SOLENOID, coil_polarity ? GPIO_PIN_SET : GPIO_PIN_RESET);
 	}
 
-	void send_one() {
+	void send_one(int index) {
 	  toggle_coil_polarity();
 	  // schedule to toggle at half_way of timer
-	  sTimer[HALF_BLOCK] = HALF_BLOCK_TIME;
-	  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME;
+	  if (index == 0) {
+		  sTimer[HALF_BLOCK] = HALF_BLOCK_TIME_TRACK_1;
+		  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME_TRACK_1;
+	  } else {
+		  sTimer[HALF_BLOCK] = HALF_BLOCK_TIME_TRACK_2;
+		  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME_TRACK_2;
+	  }
+	  while (sTimer[HALF_BLOCK] != 0);
+	  toggle_coil_polarity();
 	}
 
-	void send_zero() {
+	void send_zero(int index) {
 	  toggle_coil_polarity();
-	  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME;
+	  if (index == 0){
+		  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME_TRACK_1;
+	  } else {
+		  sTimer[FULL_BLOCK] = FULL_BLOCK_TIME_TRACK_2;
+	  }
 	}
 
 	void send_track(int index) {
+	  //send_zero(1);
 	  while (!FifoIsEmpty(index)) {
-		if (sTimer[HALF_BLOCK] == 0) {
-		  toggle_coil_polarity();
-		}
+//		if (sTimer[HALF_BLOCK] == 0) {
+//		  toggle_coil_polarity();
+//		  sTimer[HALF_BLOCK] = -1;
+//		}
 
 		if (sTimer[FULL_BLOCK] == 0) {
 		  GetFifo(index, Buffer);
 		  if (Buffer[0] == 0) {
-			send_zero();
+			send_zero(index);
 		  } else {
-			send_one();
+			send_one(index);
 		  }
 		}
 	  }
 	}
 
+	void send_zeros(int count){
+		for (int i = 0; i < count; i++) {
+			while(sTimer[FULL_BLOCK] != 0);
+			send_zero(0);
+
+		}
+	}
+
 	//iterating through each character and then for each character 7 bits (disregard the MSB)
 	void load_track_one(char* track, int length) {
-	  char t1[FIFO_SIZE];
-	  t1[0] = track1_lut['%'];
 
-	  for (int k = 1;  k < length;  k++) {
-		t1[k]=track1_lut[track[k]];
-	  }
-
-	  // Send end sentinel
-	  t1[length] = track1_lut['?'];
-
-	  for (int i = 0;  i <= length;  i++) {
+	  for (int i = 0;  i < length;  i++) {
 		for (int j = 0; j < 7; j++) {
 		  PutFifo(0, (t1[i] >> j) & 1);
 		}
 	  }
 	}
 
-	void load_track_two(char* track, int length) {
-	  char t2[FIFO_SIZE];
-	  //starting sentinal
-	  t2[0] = track2_lut[';'];
-	  for (int k = 1; k < length; k++) {
+	char* convert_track_one(char* track_in, int length) {
+	  char t1[length + 1];
+	  for (int k = 0;  k < length;  k++) {
+		t1[k]=track1_lut[track[k]];
+	  }
+	  return t1;
+	}
+
+	char* convert_track_two(char* track_in, int length) {
+	  char t2[length + 1];
+
+	  for (int k = 0; k < length; k++) {
 		// Convert to BYTE mapping of characters for magnetic tracks (from ASCII)
 		t2[k] = track2_lut[track[k]];
 	  }
-	  //ending sentinal
-	  t2[length] = track2_lut['?'];
-	  // Queue each bit of the converted BYTEs in the
-	  for (int i = 0;  i <= length;  i++) {
+
+	  return t2;
+	}
+
+	void load_track_two(char* track, int length) {
+	  for (int i = 0;  i < length;  i++) {
 		  for (int j = 0; j < 5; j++) {
 			PutFifo(1, (t2[i] >> j) & 1);
 		  }
 	  }
 	}
+
+#include <stdint.h>
+
+// Assume these lookup tables already exist in your code:
+extern const uint8_t track1_lut[128];  // full 7-bit codes
+extern const uint8_t track2_lut[128];  // full 5-bit codes
+
+// Reverse-lookup: given a full code, what 6 or 4 data bits does it contain?
+static inline uint8_t track1_data(uint8_t code) { return code & 0x3F; }
+static inline uint8_t track2_data(uint8_t code) { return code & 0x0F; }
+
+// --- Track 2 LRC (4 data bits + 1 parity) ---
+uint8_t calcTrack2LRC(const char *frame) {
+    // 1) Compute column parities P[0..3]
+    uint8_t P[4] = {0,0,0,0};
+    for (; *frame; ++frame) {
+        uint8_t data = track2_data(track2_lut[(uint8_t)*frame]);
+        for (int j = 0; j < 4; j++)
+            P[j] ^= (data >> j) & 1;
+    }
+    // 2) Choose LRC data bits to force odd parity per column
+    uint8_t lrc_data = 0;
+    for (int j = 0; j < 4; j++)
+        if ((P[j] ^ 1) & 1)        // need a ‘1’ to make (P[j]⊕D[j])==1
+            lrc_data |= (1 << j);
+
+    // 3) Compute the LRC parity bit (so its own 5 bits have odd ones)
+    int ones = __builtin_popcount(lrc_data);
+    uint8_t p = (ones % 2 == 0) ? 1 : 0;
+
+    // 4) Return the full 5-bit code (parity in bit-4)
+    return (p << 4) | lrc_data;
+}
+
+// --- Track 1 LRC (6 data bits + 1 parity) ---
+uint8_t calcTrack1LRC(const char *frame) {
+    // 1) Compute column parities P[0..5]
+    uint8_t P[6] = {0,0,0,0,0,0};
+    for (; *frame; ++frame) {
+        uint8_t data = track1_data(track1_lut[(uint8_t)*frame]);
+        for (int j = 0; j < 6; j++)
+            P[j] ^= (data >> j) & 1;
+    }
+    // 2) Choose LRC data bits to force odd parity per column
+    uint8_t lrc_data = 0;
+    for (int j = 0; j < 6; j++)
+        if ((P[j] ^ 1) & 1)
+            lrc_data |= (1 << j);
+
+    // 3) Compute the LRC parity bit (so its own 7 bits have odd ones)
+    int ones = __builtin_popcount(lrc_data);
+    uint8_t p = (ones % 2 == 0) ? 1 : 0;
+
+    // 4) Return the full 7-bit code (parity in bit-6)
+    return (p << 6) | lrc_data;
+}
+
+
+
+
+
+
 
 	void FifoInit(int index){
 	  Putpts[index] = Getpts[index] = &Fifos[index][0];
@@ -222,10 +305,11 @@
 	  FifoInit(0);
 	  FifoInit(1);
 
-	  char* track1 = "%B1234567890123456^DOE/JOHN ^25051234567890000000?";
+	  //char* track1 = "B1234567890123456^DOE/JOHN ^25051234567890000000";
+	  char* track1 = "%7001112000009182^VABALAS/DOVYDAS^000000000000?";
 	  char track2[FIFO_SIZE];
 
-	  strcpy(track2, ";1234567890123456=25051234567890000000?");
+	  strcpy(track2, ";7001112000009182=24127990000000000000?");
 
 	  reverse_string(track2);
 
@@ -234,10 +318,14 @@
 	//    HAL_Delay(3000);
 	//    toggle_coil_polarity();
 		HAL_Delay(5000);
+		send_zeros(25);
 		load_track_one(track1, strlen(track1));
 		send_track(0);
-		//load_track_two(track2, strlen(track2));
-		//send_track(1);
+		send_zeros(53);
+		//HAL_Delay(100);
+		load_track_two(track2, strlen(track2));
+		send_track(1);
+		send_zeros(25);
 
 	  }
 	  /* USER CODE END 3 */
