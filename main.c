@@ -7,20 +7,39 @@
 #include "Timer.h"
 #include "LCD.h"
 
+typedef long unsigned int uint16_t;
+typedef unsigned int uint8_t;
+
+#define NICKNAME_LEN  16
+#define TRACK1_LEN    128
+#define TRACK2_LEN    128
 #define MAX_FIELD_LEN 64
 
-#define CS GPIO_PIN_6
-#define SK GPIO_PIN_5
-#define EEPROM_START 0x01
-#define EEPROM_EWEN 0x3F
-#define EEPROM_WRITE 0x40
-#define EEPROM_EWDS 0x0F
-#define EEPROM_READ 0x80
-#define PRESSED 0
+#define NUM_CARDS_ADDR  31
+
+// #define CS GPIO_PIN_6
+// #define SK GPIO_PIN_5
+// #define EEPROM_START 0x01
+// #define EEPROM_EWEN 0x3F
+// #define EEPROM_WRITE 0x40
+// #define EEPROM_EWDS 0x0F
+// #define EEPROM_READ 0x80
+// #define PRESSED 0
+
+#define NICKNAME_SIZE 16
+#define TRACK1_SIZE 128 
+#define TRACK2_SIZE 128
 
 #define ButtonHeld 0x0001
 #define LCD_Reset 0x0001
 #define LCD_Start 0x0002
+
+#define EEPROM_I2C_ADDR     0xA0  // 0x50 << 1
+#define EEPROM_PAGE_SIZE    64
+#define EEPROM_WRITE_DELAY  5     // in ms
+
+#define MAX_NUM_CARDS       10
+#define MENU_WAIT           2000  // in ms
 
 unsigned short sButtonStatus;
 unsigned short sLCDflags;
@@ -30,7 +49,10 @@ TIM_HandleTypeDef htim5;
 TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
-uint8_t EE_Data[3];
+int num_cards;
+int recent_press = 0;
+
+char nicknames[MAX_NUM_CARDS][NICKNAME_SIZE];
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -43,24 +65,30 @@ bool Nucleo_button_pressed();
 bool Nucleo_button_pushed_verbose();
 char ClearScreen[] = { 0x1B, '[', '2' , 'J',0 }; 	// Clear the screen
 char CursorHome[] = { 0x1B, '[' , 'H' , 0 }; 	// Home the cursor
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	TIMER2_HANDLE();
 }
+
 typedef enum{
 	PUSHED,RELEASED,P2R,R2P
 }button_state_t;
 
-//void Delay_us(uint32_t us);
-void Delay_1_plus_us(void);
-void EEPROM_READ_FUN(uint8_t EE_Addr);
-void EEPROM_READ_STRING(char *buffer, uint8_t eeprom_chunks);
-void EEPROM_SEND_STRING(char *data, int address);
-void EEPROM_SEND(char EE_Addr, char EE_Data1, char EE_Data2);
+void EEPROM_WriteByte(uint16_t addr, uint8_t data);
+void EEPROM_WriteBlock(uint16_t addr, uint8_t *data, uint16_t len);
+void EEPROM_ReadByte(uint16_t addr, uint8_t *data);
+void EEPROM_ReadBlock(uint16_t addr, uint8_t *data, uint16_t len);
+// //void Delay_us(uint32_t us);
+// void Delay_1_plus_us(void);
+// void EEPROM_READ_FUN(uint8_t EE_Addr);
+// void EEPROM_READ_STRING(char *buffer, uint8_t eeprom_chunks);
+// void EEPROM_SEND_STRING(char *data, int address);
+// void EEPROM_SEND(char EE_Addr, char EE_Data1, char EE_Data2);
 
 
-void UART_send(UART_HandleTypeDef *huart, char buffer[])
+void UART_send(char buffer[])
 {
-    HAL_UART_Transmit(huart, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
+    HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
  }
 
 void readLine(char *buf, int maxLen) {
@@ -82,151 +110,269 @@ void readLine(char *buf, int maxLen) {
     HAL_UART_Transmit(&huart2, (uint8_t *)crlf, 2, HAL_MAX_DELAY);
 }
 
-    //EEPROM_READ_FUN(0);
-//    char input[]="STRINGTHINGSstrings";
-//    EEPROM_SEND_STRING(input);
-//    int num_chunks = (strlen(input) % 2 == 0) ? (strlen(input) / 2) : (strlen(input) / 2 + 1);
-//    char buffer[20];
-
-//    HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
-//    HAL_UART_Transmit(&huart2, (uint8_t *)"\n\r", 2, HAL_MAX_DELAY);
 
 
-//contains the adresses of the card ingo
-typedef struct {
-    uint16_t nickname_addr;
-    uint16_t track1_addr;
-    uint16_t track2_addr;
-} CardInfo;
-//array for the addresses
 
-CardInfo cards[5];// array of card into structs
-int card_num = 0;//the number of cards that have been created
-int write_address = 100;
 
-void save_metadata_to_eeprom() {
-    EEPROM_SEND(0, card_num,0);
-    for (int i = 0; i < card_num; i++) {
-        EEPROM_SEND(1 + i * 3, cards[i].nickname_addr >> 8, cards[i].nickname_addr & 0xFF);
-        EEPROM_SEND(1 + i * 3 + 1, cards[i].track1_addr >> 8, cards[i].track1_addr & 0xFF);
-        EEPROM_SEND(1 + i * 3 + 2, cards[i].track2_addr >> 8, cards[i].track2_addr & 0xFF);
-    }
-}
+// Data structure info:
+/*
+** Addr 0 **
+31 bytes - optional password location
+uint_8t  - # of saved cards
+----------------------------
+** Start of Card Data (addr 31 0x1F) **
+16 bytes - nickname
+128 bytes - track 1
+128 bytes - track 2
 
-void load_metadata_from_eeprom() {
-    EEPROM_READ_FUN(0);
-    card_num = EE_Data[0];
-    for (int i = 0; i < card_num; i++) {
-        EEPROM_READ_FUN(1 + i * 3);
-        cards[i].nickname_addr = (EE_Data[0] << 8) | EE_Data[1];
+*/
+typedef struct CardData{
+  char nickname[16];
+  char track1[128];
+  char track2[128];
+};
 
-        EEPROM_READ_FUN(1 + i * 3 + 1);
-        cards[i].track1_addr = (EE_Data[0] << 8) | EE_Data[1];
+typedef enum {
+  Welcome,
+  AddCard,
+  ViewNicknames,
+  ViewCard,
+  EditNickname,
+  EditTrack1,
+  EditTrack2
+} states;
 
-        EEPROM_READ_FUN(1 + i * 3 + 2);
-        cards[i].track2_addr = (EE_Data[0] << 8) | EE_Data[1];
-    }
-}
-
+states state = Welcome;
+uint16_t addrs[3];
 
 int main(void){
-//    //parallel arrays for 5 cards to access card one, all the data is the zeroth index and etc
-//    int card_nn[5];
-//    int card_t1[5];
-//    int card_t2[5];
+    int index=0;
+    
 
-    char decision;
-    char nickname[MAX_FIELD_LEN];
-    char track1[MAX_FIELD_LEN];
-    char track2[MAX_FIELD_LEN];
+    char choice;
+    int card_choice;
+
     int LCD_count=0;
     int standalone = 0;
+    uint16_t addrs[3];    
+    
 	char buffer[MAX_FIELD_LEN];
     HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
-    MX_SPI1_Init();
+    MX_I2C1_Init();
     MX_USART2_UART_Init();
     MX_TIM5_Init();
     LcdInit();
-	LcdPutS("card options");
+	  LcdPutS("Card Emulator");
     HAL_TIM_Base_Start(&htim5);
     HAL_Delay(100);
     UART_send(&huart2, ClearScreen);
     UART_send(&huart2, CursorHome);
-    load_metadata_from_eeprom();
+
+    // Read the num of cards already stored on the device
+    EEPROM_ReadByte(NUM_CARDS_ADDR, &num_cards);
+
+    // Read all of the nicknames of the cards that are present and add them to the nickname array
+    uint16_t temp_addr;
+    for (int i = 0; i < num_cards; i++) {
+      EEPROM_ReadBlock(NUM_CARDS_ADDR + 272*i, nicknames[i], 16);
+    }
+
+    uint16_t next_card_addr = NUM_CARDS_ADDR + 1 + num_cards*272;
 
 	while (1){
-		if(standalone==0){
-            HAL_UART_Transmit(&huart2, (uint8_t *)"Add new card? (y/n): ", 23, HAL_MAX_DELAY);
-			HAL_UART_Receive(&huart2, (uint8_t *)&decision, 1, HAL_MAX_DELAY);
-			HAL_UART_Transmit(&huart2, (uint8_t *)&decision, 1, HAL_MAX_DELAY);
-			HAL_UART_Transmit(&huart2, (uint8_t *)"\r\n", 2, HAL_MAX_DELAY);
+    
+    switch (state) {
+        case Welcome: {
+            UART_send("Welcome to the card emulator! Press any key to continue...\n");
+            // Wait until we have had a recent interrupt, and then check for a key.
+            // TODO
 
-			if ((decision == 'y' || decision == 'Y')) {
-				//ask for track input
-                HAL_UART_Transmit(&huart2, (uint8_t *)"Enter nickname: ", 17, HAL_MAX_DELAY);
-				readLine(nickname, MAX_FIELD_LEN);
-                HAL_UART_Transmit(&huart2, (uint8_t *)"Enter Track1 data: ", 20, HAL_MAX_DELAY);
-				readLine(track1, MAX_FIELD_LEN);
-                HAL_UART_Transmit(&huart2, (uint8_t *)"Enter Track2 data: ", 20, HAL_MAX_DELAY);
-				readLine(track2, MAX_FIELD_LEN);
+          }
+        case AddCard: {
+          struct CardData card;
+          UART_send("Enter Nickname: ");
+          readLine(card.nickname, NICKNAME_LEN);
 
-				//save each card, save the write address and then incrument the write address
-				EEPROM_SEND_STRING(nickname,write_address);
-//				card_nn[count]=write_address;
-//				write_address+= (strlen(nickname)+1)/2;
-				cards[card_num].nickname_addr = write_address;
-				write_address += (strlen(nickname) + 1 + 1) / 2;
-				EEPROM_SEND_STRING(track1,write_address);
-                cards[card_num].track1_addr = write_address;
-                write_address += (strlen(track1) + 1 + 1) / 2;
-				EEPROM_SEND_STRING(track2,write_address);
-                cards[card_num].track2_addr = write_address;
-                write_address += (strlen(track2) + 1 + 1) / 2;
+          UART_send("Enter Track 1 data: ");
+          readLine(card.track1, TRACK1_LEN);
+          
+          UART_send("Enter Track 2 data: ");
+          readLine(card.track2, TRACK2_LEN);
+          
+          uint16_t nickname_write_addr = next_card_addr;
+          uint16_t track1_write_addr = nickname_write_addr + 16;
+          uint16_t track2_write_addr = track1_write_addr + 128;
+          addrs[0]=nickname_write_addr;
+          addrs[1]=track1_write_addr;
+          addrs[2]=track2_write_addr;
+          
+          //writing all the card data to EEPROM
+          EEPROM_WriteBlock(nickname_write_addr, card.nickname,  16);
+          EEPROM_WriteBlock(track1_write_addr, card.track1, 128);
+          EEPROM_WriteBlock(track2_write_addr, card.track2, 128);
 
-                card_num++;
-				save_metadata_to_eeprom();
-				HAL_UART_Transmit(&huart2, (uint8_t *)"Card saved.\r\n", 13, HAL_MAX_DELAY);
-			}else {// if (decision != 'n' && decision != 'N')
-                HAL_UART_Transmit(&huart2, (uint8_t *)"Thanks for entering your cards\r\n", 32, HAL_MAX_DELAY);
-				standalone=1;
-			}
-		}
-		if (Nucleo_button_pushed_verbose()&&standalone==1) {
-			if (card_num == 0) continue;
-			LcdClear();
-			LcdGoto(0,0);
-			LcdPutS("card options");
-			//EEPROM_READ_STRING(cards[LCD_count].nickname_addr, buffer, MAX_FIELD_LEN);
-			int i = 0;
-			int addr = cards[LCD_count].nickname_addr;
+          EEPROM_WriteByte(NUM_CARDS_ADDR, num_cards + 1);
+          num_cards++;
+          next_card_addr += 272;
+          
+          UART_send("Card saved.\r\n");
+        }
 
+        case ViewNicknames: {
+          if (num_cards > 0) {
+            UART_send("What would you like to do?\n\
+                      Add card (A),\n\
+                      Edit card (digit)\n\n");    
+            //shows all the nicknames
+            UART_send("Nicknames: ");
+              for (int i = 0; i < num_cards; i++) {
+                  UART_send("%d   ", i);
+                  UART_send(nicknames[i]);
+                  UART_send("\n");
+              }
+              readLine(&choice, 1);
+              if (choice >= '0' && choice <= '9'){
+                card_choice = choice - '0';
+                state = ViewCard;
+              } else {
+                state = ViewNicknames;
+              }
+              break;
+              
+          } else {
+            UART_send("Press 'A' to add a card.\n\n\
+                       > ");
 
-			while (i < MAX_FIELD_LEN - 1) {
-			    EEPROM_READ_FUN(addr++);
-			    buffer[i++] = EE_Data[0];
-			    if (EE_Data[0] == '\0') break;
+            readLine(&choice, 1);
+            if (choice == 'A' || 'a') {
+              state = AddCard;
+              break;
+            }
+          }
+            
+        }
+        
+        case ViewCard: {    
+            // card_choice is the int of the card we want to show info of
+            char nickname_shown[NICKNAME_LEN];
+            char track1_shown[TRACK1_LEN];
+            char track2_shown[TRACK2_LEN];
 
-			    buffer[i++] = EE_Data[1];
-			    if (EE_Data[1] == '\0') break;
-			}
-			buffer[i] = '\0';
-			LcdGoto(1,0);
-			LcdPutS(buffer);
-			if(card_num!=0){
-				LCD_count = (LCD_count + 1) % card_num;
-			}else{
-				LcdPutS("INVALID NO CARDS");
-			}
+            uint16_t block_addr = NUM_CARDS_ADDR + 272*card_choice;
 
-			HAL_Delay(200);
-		}
-	}
+            // Read card info from EEPROM
+            EEPROM_ReadBlock(block_addr, nickname_shown, NICKNAME_LEN);
+            EEPROM_ReadBlock(block_addr + NICKNAME_LEN, track1_shown, TRACK1_LEN);
+            EEPROM_ReadBlock(block_addr + NICKNAME_LEN + TRACK1_LEN, track2_shown, TRACK2_LEN);
+
+            UART_send("Press '0' to edit Nickname\n");
+            UART_send("Press '1' to edit Track 1\n");
+            UART_send("Press '2' to edit Track 2\n");
+            UART_send("Press any other key to exit\n\n");
+
+            UART_send("Nickname: ");
+            UART_send(nickname_shown);
+            UART_send("Track 1: ");
+            UART_send(track1_shown);
+            UART_send("Track 2: ");
+            UART_send(track2_shown);
+
+            readLine(&choice, 1);
+
+            if (choice == '0') {
+              state = EditNickname;
+            } else if (choice == '1') {
+              state = EditTrack1;
+            } else if (choice == '2') {
+              state = EditTrack2;
+            } else {
+              state = ViewNicknames;
+            }
+
+            break;
+        }
+
+        case EditNickname: {
+          //ask user for new input and save that input through eeprom
+          char new_nickname[NICKNAME_LEN];
+          UART_send("Enter a new nickname: ");
+          readLine(new_nickname, NICKNAME_LEN);
+          EEPROM_WriteBlock(NUM_CARDS_ADDR + card_choice*272, new_nickname, NICKNAME_LEN);
+          UART_send("Nickname saved.");
+          HAL_Delay(MENU_WAIT);
+          state = ViewNicknames;
+          break;
+        }
+
+        case EditTrack1: {
+          char new_track1[TRACK1_LEN];
+          UART_send("Enter new track1 data: ");
+          readLine(new_track1,TRACK1_LEN);
+          EEPROM_WriteBlock(NUM_CARDS_ADDR + card_choice*272 + NICKNAME_LEN, new_track1, TRACK1_LEN);
+          UART_send("Track 1 saved.");
+          HAL_Delay(MENU_WAIT);
+          state = ViewNicknames;
+          break;
+        }
+
+        case EditTrack2: {
+          char new_track2[TRACK2_LEN];
+          UART_send("Enter a new Track 2: ");
+          readLine(new_track2, TRACK2_LEN);
+          EEPROM_WriteBlock(NUM_CARDS_ADDR + card_choice*272 + NICKNAME_LEN + TRACK1_LEN, new_track2, TRACK2_LEN);
+          UART_send("Track 2 saved.");
+          HAL_Delay(MENU_WAIT);
+          state = ViewNicknames;
+          break;
+        }
+        
+        default:{
+          char nickname[NICKNAME_LEN];
+          char track1[TRACK1_LEN];
+          char track2[TRACK2_LEN];
+          int choice_counter=0;
+          LcdClear();
+          LcdGoto(0,0);
+          LcdPutS("Card Options");
+          LcdGoto(1,0);
+
+          bool button_held = false;
+          bool button_pressed = false;
+          //rotate through the cards 
+          if (sTimer[BUTTON_SCAN_TIMER] == 0) {
+            button_pressed = Nucleo_button_pushed_verbose();
+            if (button_held) {
+              // Read tracks from memory, format everything, and send
+              // TODO
+            } else if (button_pressed) {
+              // for (int i = 0; i < num_cards; i++) {
+              EEPROM_ReadBlock((272*choice_counter) % MAX_NUM_CARDS, nickname, NICKNAME_LEN);
+              EEPROM_ReadBlock((272*choice_counter) % MAX_NUM_CARDS+ NICKNAME_LEN, track1, TRACK1_LEN);
+              EEPROM_ReadBlock((272*choice_counter) % MAX_NUM_CARDS + NICKNAME_LEN + TRACK1_LEN, track2, TRACK2_LEN);
+              // }
+              LcdPutS(nickname);
+              choice_counter++;
+            }
+
+            sTimer[BUTTON_SCAN_TIMER] = BUTTON_SCAN_TIME;
+            
+          }
+          HAL_Delay(200);
+          break;
+        }
+        // Invalid input (do nothing)
+
+    }
+  }
 }
 
+
+
+
 bool Nucleo_button_pressed(){
-	return 	(HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_13) != PRESSED);
+	return 	(HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != PRESSED);
 }
 bool Nucleo_button_pushed_verbose(){
 	static button_state_t state = PRESSED;
@@ -280,94 +426,38 @@ bool Nucleo_button_pushed_verbose(){
 
 }
 
-//------------------------eeprom reading functions------------------
-////woulkd not fit because sues chunks not while loop with break condition as null term
-//void EEPROM_READ_STRING(char *buffer, uint8_t eeprom_chunks)
-//{
-//    int i = 0;
-//    for (uint8_t addr = 0; addr < eeprom_chunks; addr++) {
-//        EEPROM_READ_FUN(addr); // fills EE_Data[0] and EE_Data[1]
-//        buffer[i++] = EE_Data[0];
-//        buffer[i++] = EE_Data[1];
-//    }
-//    buffer[i] = '\0'; // Null-terminate the string
-//}
 
-//given function for reading 2 chars form eeprom
-void EEPROM_READ_FUN(uint8_t EE_Addr)
-{
-    uint8_t buf[2];
 
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
-    buf[0] = EEPROM_START;
-    HAL_SPI_Transmit(&hspi1, buf, 2, 100);
 
-    HAL_SPI_Receive(&hspi1, EE_Data, 3, 100);
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);           // Chip Select disable
-    Delay_1_plus_us();
-
-    EE_Data[0] <<= 1;
-    if (EE_Data[1] & 0x80)
-    	EE_Data[0] |= 0x01;
-
-    EE_Data[1] <<= 1;
-        if (EE_Data[2] & 0x80)
-        EE_Data[1] |= 0x01;
+void EEPROM_WriteByte(uint16_t mem_addr, uint8_t data) {
+    HAL_I2C_Mem_Write(&hi2c1, EEPROM_I2C_ADDR, mem_addr, I2C_MEMADD_SIZE_16BIT,&data, 1, HAL_MAX_DELAY);
+    HAL_Delay(EEPROM_WRITE_DELAY);
 }
-//-----------------------------eeprom sending functions
-//sends a string by reprtitively calling send and sending 2 chars at a time, all at adjacent adresses
-void EEPROM_SEND_STRING(char *data, int address) {
-    int len = strlen(data);
-    for (int i = 0; i < len; i += 2) {
-        char d1 = data[i];
-        char d2 = (i+1 < len) ? data[i+1] : 0; // zero-pad if odd length
-        int chunk = i / 2;                     // which 2-byte chunk this is
-        EEPROM_SEND(address + chunk, d1, d2);
+
+void EEPROM_ReadByte(uint16_t mem_addr, uint8_t *data) {
+    HAL_I2C_Mem_Read(&hi2c1, EEPROM_I2C_ADDR, mem_addr, I2C_MEMADD_SIZE_16BIT,data, 1, HAL_MAX_DELAY);
+}
+
+void EEPROM_WriteBlock(uint16_t mem_addr, uint8_t *data, uint16_t len) {
+    while (len > 0) {
+        // Calculate how many bytes remain in current EEPROM page
+        uint16_t bytes_left_in_page = EEPROM_PAGE_SIZE - (mem_addr % EEPROM_PAGE_SIZE);
+        uint16_t chunk_size = (len < bytes_left_in_page) ? len : bytes_left_in_page;
+
+        HAL_I2C_Mem_Write(&hi2c1, EEPROM_I2C_ADDR, mem_addr, I2C_MEMADD_SIZE_16BIT,data, chunk_size, HAL_MAX_DELAY);
+        HAL_Delay(EEPROM_WRITE_DELAY);  // Wait for write cycle to complete
+
+        mem_addr += chunk_size;
+        data +=   chunk_size;
+        len -= chunk_size;
     }
 }
-//given send to send 2 chars
-void EEPROM_SEND(char EE_Addr, char EE_Data1, char EE_Data2)
-{
-    uint8_t buf[4];
 
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
-    buf[0] = EEPROM_START;
-    buf[1] = EEPROM_EWEN; //EEPROM_EWEN;
-    HAL_SPI_Transmit(&hspi1, buf, 2, 100);
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);       // Chip Select disable
-
-    Delay_1_plus_us();
-
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
-    buf[0] = EEPROM_START;
-    buf[1] = (0x40 | (EE_Addr & 0x03F));        // WRITE command OR with 6-bit address
-    buf[2] = EE_Data1;
-    buf[3] = EE_Data2;
-    HAL_SPI_Transmit(&hspi1, buf, 4, 100);
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);       // Chip Select disable
-
-    HAL_Delay(20);
-
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_SET);         // Chip Select Enable
-    buf[0] = EEPROM_START;
-    buf[1] = EEPROM_EWDS;
-    HAL_SPI_Transmit(&hspi1, buf, 2, 100);
-    HAL_GPIO_WritePin(GPIOB, CS, GPIO_PIN_RESET);           // Chip Select disable
-
-    Delay_1_plus_us();
-
+void EEPROM_ReadBlock(uint16_t mem_addr, uint8_t *data, uint16_t len) {
+    HAL_I2C_Mem_Read(&hi2c1, EEPROM_I2C_ADDR, mem_addr, I2C_MEMADD_SIZE_16BIT, data, len, HAL_MAX_DELAY);
 }
-//given
-void Delay_1_plus_us()
-{
-    uint32_t time5now = htim5.Instance->CNT;
-    while (htim5.Instance->CNT == time5now)
-        ; ;
-    time5now = htim5.Instance->CNT;
 
-    while (htim5.Instance->CNT == time5now)
-        ; ;
-}
+
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
