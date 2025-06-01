@@ -1,27 +1,24 @@
-	#include "main.h"
+#include "main.h"
 	#include <stdint.h>
 	#include <stddef.h>
 	#include <stdio.h>
 	#include <string.h>
+	#include "stdbool.h"
 	#include "Timer.h"
 
-	#define SOLENOID	GPIO_PIN_6		// Pin B6
-	#define S_PORT     GPIOB
-	#define FIFO_SIZE 100 // size of longest track
-	#define LENGTH1 60
-	#define LENGTH2 39
+	#define SOLENOID_1	GPIO_PIN_0		// Pin A0
+	#define	SOLENOID_2  GPIO_PIN_1
+	#define S_PORT      GPIOA
+	#define FIFO_SIZE 	100 			// size of longest track
 
-	// #define FifoTrackOneSize 601 // 69 for track one and \0--> null terminator  |  60 bits time 7 is 600
-	// #define FifoTrackTwoSize 391 // 30 for track 2 plus \0--> null terminator  |  39 bits time 7 is 390
-
-	#define NUM_FIFOS 2
-
-	int coil_polarity = 0;
+	#define NUM_FIFOS 	2
 
 	TIM_HandleTypeDef htim2;
-
 	UART_HandleTypeDef huart2;
 	UART_HandleTypeDef huart3;
+	I2C_HandleTypeDef hi2c1;
+
+	int coil_polarity = 0;
 
 	//for FIFO use
 	char Buffer[1];
@@ -33,10 +30,12 @@
 	volatile char Fifos[NUM_FIFOS][FIFO_SIZE];
 
 	void SystemClock_Config(void);
+	static void MX_USART2_UART_Init(void);
 	static void MX_GPIO_Init(void);
 	static void MX_TIM2_Init(void);
 	static void MX_USART2_UART_Init(void);
 	static void MX_USART3_UART_Init(void);
+
 	//%B1234567890123456^DOE/JOHN           ^25051234567890000000?  <-- track 1 example
 	//;1234567890123456=25051234567890000000? <-- track 2 example
 
@@ -120,7 +119,19 @@
 
 	void toggle_coil_polarity() {
 	  coil_polarity = !coil_polarity;
-	  HAL_GPIO_WritePin(S_PORT, SOLENOID, coil_polarity ? GPIO_PIN_SET : GPIO_PIN_RESET);
+	  if (coil_polarity) {
+		  HAL_GPIO_WritePin(S_PORT, SOLENOID_1, GPIO_PIN_SET);
+		  HAL_GPIO_WritePin(S_PORT, SOLENOID_2, GPIO_PIN_RESET);
+	  } else {
+		  HAL_GPIO_WritePin(S_PORT, SOLENOID_1, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(S_PORT, SOLENOID_2, GPIO_PIN_RESET);
+	  }
+	}
+
+	void set_polarity_low() {
+		coil_polarity = 0;
+		HAL_GPIO_WritePin(S_PORT, SOLENOID_1, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(S_PORT, SOLENOID_2, GPIO_PIN_RESET);
 	}
 
 	void send_one(int index) {
@@ -161,47 +172,56 @@
 	  }
 	}
 
-	void send_zeros(int count){
-		for (int i = 0; i < count; i++) {
-			while(sTimer[FULL_BLOCK] != 0);
-			send_zero(0);
+	void send_zeros(int track, int count){
+		if (track == 0) {
+			for (int i = 0; i < count; i++) {
+				while(sTimer[FULL_BLOCK] != 0);
+				send_zero(0);
 
+			}
+		} else {
+			for (int i = 0; i < count; i++) {
+				while(sTimer[FULL_BLOCK] != 0);
+				send_zero(1);
+
+			}
 		}
 	}
 
 	//iterating through each character and then for each character 7 bits (disregard the MSB)
 	void load_track_one(char* track, int length) {
-
+		//char t1[length];
 	  for (int i = 0;  i < length;  i++) {
 		for (int j = 0; j < 7; j++) {
-		  PutFifo(0, (t1[i] >> j) & 1);
+		  PutFifo(0, (track[i] >> j) & 1);
 		}
 	  }
 	}
 
-	char* convert_track_one(char* track_in, int length) {
-	  char t1[length + 1];
+	int convert_track_one(char* track, int length) {
+	  //char t1[length + 1];
 	  for (int k = 0;  k < length;  k++) {
-		t1[k]=track1_lut[track[k]];
+		track[k]=track1_lut[track[k]];
 	  }
-	  return t1;
+	  return length;
 	}
 
-	char* convert_track_two(char* track_in, int length) {
-	  char t2[length + 1];
+	int convert_track_two(char* track, int length) {
+	  //char t2[length + 1];
 
 	  for (int k = 0; k < length; k++) {
 		// Convert to BYTE mapping of characters for magnetic tracks (from ASCII)
-		t2[k] = track2_lut[track[k]];
+		track[k] = track2_lut[track[k]];
 	  }
 
-	  return t2;
+	  return length;
 	}
 
 	void load_track_two(char* track, int length) {
+	//char t2[length];
 	  for (int i = 0;  i < length;  i++) {
 		  for (int j = 0; j < 5; j++) {
-			PutFifo(1, (t2[i] >> j) & 1);
+			PutFifo(1, (track[i] >> j) & 1);
 		  }
 	  }
 	}
@@ -293,6 +313,65 @@ size_t appendTrack1LRC(uint8_t *codes, size_t length) {
 	  }
 	}
 
+	// Returns -1 if valid, else returns invalid char
+	char validate_track(char* track, int length, int track_num) {
+		if (track_num == 0) {
+			for (int i = 0; i < length; i++) {
+				if (track1_lut[track[i]] == 0x00) {
+					// invalid char
+					return track[i];
+				}
+			}
+		} else {
+			for (int i = 0; i < length; i++) {
+				if (track2_lut[track[i]] == 0x00) {
+					// invalid char
+					return track[i];
+				}
+			}
+		}
+		return -1;
+	}
+
+	// Removes whitespace (track2) and character returns. Returns new length
+	int clean_track(char* track, int length, int track_num) {
+		int curr = 0;
+		if (track_num == 0){
+			for (int i = 0; i < length; i++) {
+				if (track[i] == '\r' || track[i] == '\n' || track[i] == '\t') {
+					// characters to be cleaned
+				} else {
+					track[curr] = track[i];
+					curr++;
+				}
+			}
+		} else {
+			for (int i = 0; i < length; i++) {
+				if (track[i] == ' ' || track[i] == '\r' || track[i] == '\n' || track[i] == '\t') {
+					// characters to be cleaned
+				} else {
+					track[curr] = track[i];
+					curr++;
+				}
+			}
+		}
+		return curr;
+	}
+
+	// Split a user input into the 2 different tracks and their lengths
+//	tracks_and_lengths parse_tracks(char* input) {
+//
+//	}
+
+	void send_both_tracks() {
+		send_zeros(0, 25);
+		send_track(0);
+		send_zeros(0, 28);
+		send_zeros(1, 25);
+		send_track(1);
+		send_zeros(1, 25);
+	}
+
 	int main(void)
 	{
 
@@ -302,7 +381,7 @@ size_t appendTrack1LRC(uint8_t *codes, size_t length) {
 	  MX_GPIO_Init();
 	  MX_TIM2_Init();
 	  MX_USART2_UART_Init();
-	  MX_USART3_UART_Init();
+	  MX_I2C1_Init();
 
 	  HAL_TIM_Base_Start_IT(&htim2);  // Start timer 2 interrupt
 
@@ -310,47 +389,42 @@ size_t appendTrack1LRC(uint8_t *codes, size_t length) {
 	  FifoInit(1);
 
 	  #define track1_ascii_str	"%7001112000009182^VABALAS/DOVYDAS^000000000000?"
+		//#define track1_ascii_str	"%P?"
 	  #define track2_ascii_str	";7001112000009182=24127990000000000000?"
-	  
-	  int track1_ascii_strlen = strlen(track1_ascii_str);
-	  int track1_ascii_strlen = strlen(track2_ascii_str);
 
-	  
+	  int track1_ascii_strlen = strlen(track1_ascii_str);
+	  int track2_ascii_strlen = strlen(track2_ascii_str);
+
 	  //char* track1 = "B1234567890123456^DOE/JOHN ^25051234567890000000";
 	  //char* track1 = "%7001112000009182^VABALAS/DOVYDAS^000000000000?";
-	
+
 	  char track1_ascii[FIFO_SIZE];
 	  char track2_ascii[FIFO_SIZE];
-	  
+
 	  strcpy(track1_ascii, track1_ascii_str);
 	  strcpy(track2_ascii, track2_ascii_str);
 
 	  // converting tracks to bytes
-	  char track1_converted = convert_track_one(track1_ascii, track1_ascii_strlen);
-	  char track2_converted = convert_track_two(track2_ascii,track1_ascii_strlen);
-	  
-	  int track1_converted_len = appendTrack1LRC(track1_converted, track1_ascii_strlen);
-	  int track2_converted_len= appendTrack2LRC(track2_converted,track2_ascii_strlen);
-		
-	  load_track_one(track1_converted, track1_converted_len);
-	  load_track_two(track2_converted, track2_converted_len);
-	  
+	  int track1_converted = convert_track_one(track1_ascii, track1_ascii_strlen);
+	  int track2_converted = convert_track_two(track2_ascii, track2_ascii_strlen);
+
+	  // Append track LRC character
+	  int track1_converted_len = appendTrack1LRC(track1_ascii, track1_converted);
+	  int track2_converted_len = appendTrack2LRC(track2_ascii, track2_converted);
+
+
 	  while (1)
 	  {
-		
 		HAL_Delay(5000);
-		send_zeros(25);
-		send_track(0);
-		send_zeros(53);
-		send_track(1);
-		send_zeros(25);
+		load_track_one(track1_ascii, track1_converted_len);
+	    load_track_two(track2_ascii, track2_converted_len);
+		send_both_tracks();
+
+		HAL_Delay(50);
+		set_polarity_low();
 
 	  }
-	  /* USER CODE END 3 */
 	}
-
-
-
 /**
   * @brief System Clock Configuration
   * @retval None
@@ -401,6 +475,54 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x10D19CE4;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief TIM2 Initialization Function
   * @param None
   * @retval None
@@ -419,10 +541,10 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 3999;
+  htim2.Init.Prescaler = 79;
   htim2.Init.CounterMode = TIM_COUNTERMODE_DOWN;
-  htim2.Init.Period = 19;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV2;
+  htim2.Init.Period = 99;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
   {
@@ -477,41 +599,6 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
-
-}
-
-/**
-  * @brief USART3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART3_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART3_Init 0 */
-
-  /* USER CODE END USART3_Init 0 */
-
-  /* USER CODE BEGIN USART3_Init 1 */
-
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART3_Init 2 */
-
-  /* USER CODE END USART3_Init 2 */
 
 }
 
