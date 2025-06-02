@@ -1,0 +1,5 @@
+../Core/Src/fifo.c:5:6:FifoInit	1
+../Core/Src/fifo.c:9:6:FifoInitAll	2
+../Core/Src/fifo.c:15:5:GetFifo	3
+../Core/Src/fifo.c:26:5:FifoIsEmpty	1
+../Core/Src/fifo.c:30:5:PutFifo	3

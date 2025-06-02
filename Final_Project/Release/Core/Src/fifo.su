@@ -1,0 +1,5 @@
+../Core/Src/fifo.c:5:6:FifoInit	16	static
+../Core/Src/fifo.c:9:6:FifoInitAll	16	static
+../Core/Src/fifo.c:15:5:GetFifo	16	static
+../Core/Src/fifo.c:26:5:FifoIsEmpty	16	static
+../Core/Src/fifo.c:30:5:PutFifo	24	static
