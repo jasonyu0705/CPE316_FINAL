@@ -7,12 +7,13 @@
    #define SCOPE extern
 #endif
 
-#define NUMBER_OF_TIMERS			4
+#define NUMBER_OF_TIMERS			5
 
 #define FULL_BLOCK					0
 #define HALF_BLOCK					1
 #define BUTTON_SCAN_TIMER			2
 #define BUTTON_HOLD_TIMER			3
+#define BETWEEN_TRACK_TIMER			4
 
 #define FULL_BLOCK_TIME_TRACK_1				16		// Time in 100us / 0.1ms
 #define HALF_BLOCK_TIME_TRACK_1				FULL_BLOCK_TIME_TRACK_1 / 2

@@ -81,7 +81,7 @@ coil_polarity = !coil_polarity;
         HAL_GPIO_WritePin(S_PORT, SOLENOID_2, GPIO_PIN_RESET);
     } else {
         HAL_GPIO_WritePin(S_PORT, SOLENOID_1, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(S_PORT, SOLENOID_2, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(S_PORT, SOLENOID_2, GPIO_PIN_SET);
     }
 }
 
@@ -164,6 +164,25 @@ void load_track_two(char* track, int length) {
     }
 }
 
+//void load_track_two_rev(char* track, int length) {
+//// i = length−1 … 0 reverses the character order
+//	for (int i = length - 1; i >= 0; i--) {
+//		// But still send each 5-bit code LSB first:
+//		for (int j = 0; j < 5; j++) {
+//			PutFifo(1, (track[i] >> j) & 1);
+//		}
+//	}
+//}
+
+void load_track_two_rev(char* track, int length){
+	for (int i = length - 1; i >= 0; i--) {
+		for (int j = 0; j < 5; j++) {
+			PutFifo(1, (track[i] >> (4 - j)) & 1);
+		}
+	}
+
+}
+
 int convert_track_one(char* track, int length) {
     //char t1[length + 1];
     for (int k = 0;  k < length;  k++) {
@@ -184,52 +203,137 @@ int convert_track_two(char* track, int length) {
 }
 
 // --- Track 1 (7-bit codes: 6 data bits + 1 parity) ---
-size_t appendTrack1LRC(uint8_t *codes, size_t length) {
-    // 1) XOR-fold the 6 data-bit columns
-    uint8_t P[6] = {0,0,0,0,0,0};
-    for (size_t i = 0; i < length; i++) {
-        uint8_t data = codes[i] & 0x3F;         // lower 6 bits = data
-        for (int j = 0; j < 6; j++)
-            P[j] ^= (data >> j) & 1;
+//size_t appendTrack1LRC(uint8_t *codes, size_t length) {
+//    // 1) XOR-fold the 6 data-bit columns
+//    uint8_t P[6] = {0,0,0,0,0,0};
+//    for (size_t i = 0; i < length; i++) {
+//        uint8_t data = codes[i] & 0x3F;         // lower 6 bits = data
+//        for (int j = 0; j < 6; j++)
+//            P[j] ^= (data >> j) & 1;
+//    }
+//    // 2) Pick LRC data bits so each column has odd parity
+//    uint8_t lrc_data = 0;
+//    for (int j = 0; j < 6; j++)
+//        if ((P[j] ^ 1) & 1)
+//            lrc_data |= (1 << j);
+//
+//    // 3) Compute LRC’s own parity bit (so its 7 bits are odd)
+//    int ones = __builtin_popcount(lrc_data);
+//    uint8_t p = (ones % 2 == 0) ? 1 : 0;
+//
+//    // 4) Form the full 7-bit code and append
+//    uint8_t lrc_code = (p << 6) | lrc_data;
+//    codes[length] = lrc_code;
+//    return length + 1;
+//}
+//
+//// --- Track 2 (5-bit codes: 4 data bits + 1 parity) ---
+//size_t appendTrack2LRC(uint8_t *codes, size_t length) {
+//    // 1) XOR-fold the 4 data-bit columns
+//    uint8_t P[4] = {0,0,0,0};
+//    for (size_t i = 0; i < length; i++) {
+//        uint8_t data = codes[i] & 0x0F;         // lower 4 bits = data
+//        for (int j = 0; j < 4; j++)
+//            P[j] ^= (data >> j) & 1;
+//    }
+//    // 2) Pick LRC data bits so each column has odd parity
+//    uint8_t lrc_data = 0;
+//    for (int j = 0; j < 4; j++)
+//        if ((P[j] ^ 1) & 1)
+//            lrc_data |= (1 << j);
+//
+//    // 3) Compute LRC’s own parity bit (so its 5 bits are odd)
+//    int ones = __builtin_popcount(lrc_data);
+//    uint8_t p = (ones % 2 == 0) ? 1 : 0;
+//
+//    // 4) Form the full 5-bit code and append
+//    uint8_t lrc_code = (p << 4) | lrc_data;
+//    codes[length] = lrc_code;
+//    return length + 1;
+//}
+
+int appendTrack1LRC(char* codes, int length) {
+    int cols[6] = {0, 0, 0, 0, 0, 0};
+
+    // XOR each column
+    for (int i = 0; i < length; i++) {
+        for (int j = 0; j < 6; j++) {
+            cols[j] ^= (codes[i] >> (5 - j)) & 1;
+        }
     }
-    // 2) Pick LRC data bits so each column has odd parity
-    uint8_t lrc_data = 0;
-    for (int j = 0; j < 6; j++)
-        if ((P[j] ^ 1) & 1)
-            lrc_data |= (1 << j);
 
-    // 3) Compute LRC’s own parity bit (so its 7 bits are odd)
-    int ones = __builtin_popcount(lrc_data);
-    uint8_t p = (ones % 2 == 0) ? 1 : 0;
+    // Count number of 1s in LRC_data
+    // We want an odd number of ones after LRC parity
+    // So if num_1s is even, LRC parity = 1, else 0
+    int num_ones = 0;
+    for (int i = 0; i < 6; i++) {
+        if (cols[i] == 1) {
+            num_ones++;
+        }
+    }
+    int LRC_parity;
+    if ((num_ones % 2) == 0) {
+        // Even, so LRC parity is 1
+        LRC_parity = 1;
+    } else {
+        LRC_parity = 0;
+    }
 
-    // 4) Form the full 7-bit code and append
-    uint8_t lrc_code = (p << 6) | lrc_data;
-    codes[length] = lrc_code;
+    // Form actual LRC value
+    unsigned char LRC_val = 0;
+
+    // Insert parity bit
+    LRC_val |= (LRC_parity << 6);
+
+    // Add col vals
+    for (int i = 0; i < 6; i++) {
+        LRC_val |= (cols[i] << (5-i));
+    }
+
+    codes[length] = LRC_val;
     return length + 1;
 }
 
-// --- Track 2 (5-bit codes: 4 data bits + 1 parity) ---
-size_t appendTrack2LRC(uint8_t *codes, size_t length) {
-    // 1) XOR-fold the 4 data-bit columns
-    uint8_t P[4] = {0,0,0,0};
-    for (size_t i = 0; i < length; i++) {
-        uint8_t data = codes[i] & 0x0F;         // lower 4 bits = data
-        for (int j = 0; j < 4; j++)
-            P[j] ^= (data >> j) & 1;
+
+int appendTrack2LRC(char* codes, int length) {
+    int cols[4] = {0, 0, 0, 0};
+
+    // XOR each column
+    for (int i = 0; i < length; i++) {
+        for (int j = 0; j < 4; j++) {
+            cols[j] ^= (codes[i] >> (3 - j)) & 1;
+        }
     }
-    // 2) Pick LRC data bits so each column has odd parity
-    uint8_t lrc_data = 0;
-    for (int j = 0; j < 4; j++)
-        if ((P[j] ^ 1) & 1)
-            lrc_data |= (1 << j);
 
-    // 3) Compute LRC’s own parity bit (so its 5 bits are odd)
-    int ones = __builtin_popcount(lrc_data);
-    uint8_t p = (ones % 2 == 0) ? 1 : 0;
+    // Count number of 1s in LRC_data
+    // We want an odd number of ones after LRC parity
+    // So if num_1s is even, LRC parity = 1, else 0
+    int num_ones = 0;
+    for (int i = 0; i < 4; i++) {
+        if (cols[i] == 1) {
+            num_ones++;
+        }
+    }
+    int LRC_parity;
+    if ((num_ones % 2) == 0) {
+        // Even, so LRC parity is 1
+        LRC_parity = 1;
+    } else {
+        LRC_parity = 0;
+    }
 
-    // 4) Form the full 5-bit code and append
-    uint8_t lrc_code = (p << 4) | lrc_data;
-    codes[length] = lrc_code;
+    // Form actual LRC value
+    unsigned char LRC_val = 0;
+
+    // Insert parity bit
+    LRC_val |= (LRC_parity << 4);
+
+    // Add col vals
+    for (int i = 0; i < 4; i++) {
+        LRC_val |= (cols[i] << (3-i));
+    }
+
+    codes[length] = LRC_val;
     return length + 1;
 }
 
@@ -281,10 +385,19 @@ int clean_track(char* track, int length, int track_num) {
 void send_both_tracks() {
     send_zeros(0, 25);
     send_track(0);
-    send_zeros(0, 28);
+    send_zeros(0, 25);
+    set_polarity_low();
+    //delay_between_tracks(FULL_BLOCK_TIME_TRACK_1 * 25);
+    HAL_Delay(1500);
     send_zeros(1, 25);
     send_track(1);
     send_zeros(1, 25);
+}
+
+// time in 0.1ms units
+void delay_between_tracks(int time) {
+	sTimer[BETWEEN_TRACK_TIMER] = time;
+	while (sTimer[BETWEEN_TRACK_TIMER] != 0);
 }
 
 void init_tracks(char* track1_str, char* track2_str) {
@@ -292,10 +405,22 @@ void init_tracks(char* track1_str, char* track2_str) {
     set_track(2, track2_str);
     
     track1_len = convert_track_one(track1, track1_len);
-    track2_len = convert_track_one(track2, track2_len);
+    track2_len = convert_track_two(track2, track2_len);
 
     track1_len = appendTrack1LRC(track1, track1_len);
     track2_len = appendTrack2LRC(track2, track2_len);
+}
+
+void init_track(int index, char* track_str) {
+	if (index == 0) {
+		set_track(1, track_str);
+		track1_len = convert_track_one(track1, track1_len);
+		track1_len = appendTrack1LRC(track1, track1_len);
+	} else {
+		set_track(2, track_str);
+		track2_len = convert_track_two(track2, track2_len);
+		track2_len = appendTrack2LRC(track2, track2_len);
+	}
 }
 
 // Assigns tracks to variables used for transmission
@@ -312,11 +437,31 @@ void set_track(int track_num, char* track_str) {
 // Desired tracks must be initialized prior to calling this function
 // int delay - delay in ms between sends
 void transmit_both_tracks(int delay) {
-        HAL_Delay(delay);
 		load_track_one(track1, track1_len);
-	    load_track_two(track2, track2_len);
+	    //load_track_two(track2, track2_len);
+		load_track_two_rev(track2, track2_len);
 		send_both_tracks();
 
 		HAL_Delay(50);
 		set_polarity_low();
+
+        HAL_Delay(delay);
 }
+
+void transmit_track_one() {
+	load_track_one(track1, track1_len);
+	send_zeros(0,25);
+	send_track(0);
+	send_zeros(0,25);
+	set_polarity_low();
+}
+
+void transmit_track_two() {
+	load_track_two_rev(track2, track2_len);
+	send_zeros(1, 25);
+	send_track(1);
+	send_zeros(1, 25);
+	set_polarity_low();
+}
+
+
