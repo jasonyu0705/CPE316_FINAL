@@ -8,7 +8,7 @@
 #endif
 
 
-#define FIFO_SIZE 	100 			// size of longest track
+#define FIFO_SIZE 	600 			// size of longest track
 #define NUM_FIFOS 	2	
 
 //for FIFO use

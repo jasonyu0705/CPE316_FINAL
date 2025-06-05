@@ -21,7 +21,7 @@
 #define NUM_CARDS_ADDR  0x31
 #define FIRST_BLOCK_ADDR (NUM_CARDS_ADDR + 1)
 
-#define LCD_NICKNAME_LINE   "Nicknames:"
+#define LCD_NICKNAME_LINE   "Nickname:"
 
 #define ButtonHeld 0x0001
 #define LCD_Reset 0x0001
@@ -35,6 +35,12 @@
 #define MENU_WAIT           2000  // in ms
 
 #define UART_REC 0x0001
+
+#define TRACK1_BUT_PIN  GPIO_PIN_4
+#define TRACK1_BUT_PORT GPIOA
+
+#define TRACK2_BUT_PIN  GPIO_PIN_0
+#define TRACK2_BUT_PORT GPIOB
 
 unsigned short sButtonStatus;
 unsigned short sLCDflags;
@@ -73,7 +79,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   UART_received = 1;
   HAL_UART_Receive_IT(&huart2, &UART_RX_byte, 1);
-  
+
 }
 
 HAL_StatusTypeDef EEPROM_ReadBuffer(uint16_t memAddress,
@@ -89,6 +95,18 @@ HAL_StatusTypeDef EEPROM_ReadByte(uint16_t memAddress,
 
 HAL_StatusTypeDef EEPROM_WriteByte(uint16_t memAddress,
                                    uint8_t   data);
+
+
+bool blue_button_pressed();
+bool track1_button_pressed();
+bool track2_button_pressed();
+
+bool Blue_Debounce();
+bool Track1_Debounce();
+bool Track2_Debounce();
+
+void track1_UART_decode(char* track_in);
+void track2_UART_decode(char* track_in);
 
 void delete_card(int card);
 
@@ -168,7 +186,7 @@ void pollReadLine() {
   if (line_active == 0) return;
   if (!tryReadChar()) {
     // No new char, so main thread continues
-    return;    
+    return;
   }
   // UART was received (buffer has a new char)
 
@@ -179,7 +197,7 @@ void pollReadLine() {
     *line_done = 1;
     return;
   }
-  
+
   if (UART_RX_byte == '\r' || UART_RX_byte == '\n') {
     line_buf[line_idx] = '\0';
     // Echo newline
@@ -311,6 +329,9 @@ int main(void){
 
   EEPROM_ReadByte(NUM_CARDS_ADDR, &num_cards);
 
+  
+  static int new_LCD_state = 1;
+
   // EEPROM_ReadByte(NUM_CARDS_ADDR, &num_cards);
 
 	// sprintf(temp, "num_cards = %d\n\r\n\r\n\r", num_cards);
@@ -333,6 +354,7 @@ int main(void){
   //LCD initialization and clearing
   LcdInit();
   LcdClear();
+  LcdWriteCmd(0x0C);
 
 	while (1){
 
@@ -351,7 +373,7 @@ int main(void){
           static int AddNickname_read = 0;
           static char add_nickname[NICKNAME_LEN];
           if (!line_active && !AddNickname_read) {
-            
+
 
             next_card_addr = FIRST_BLOCK_ADDR + num_cards*CARD_DATA_SIZE;
 
@@ -367,7 +389,6 @@ int main(void){
 
             //writing all the card data to EEPROM
             EEPROM_WriteBuffer(nickname_write_addr, add_nickname,  NICKNAME_LEN);
-            sTimer[MENU_WAIT_TIMER]=MENU_WAIT_TIME;
             UART_state = AddTrack1;
             AddNickname_read = 0;
             break;
@@ -380,7 +401,7 @@ int main(void){
           static char add_track1[TRACK1_LEN];
           if(!line_active && !AddTrack1_read){
             next_card_addr = FIRST_BLOCK_ADDR + num_cards*CARD_DATA_SIZE;
-            
+
 
             UART_send(ClearScreen);
             UART_send(CursorHome);
@@ -389,11 +410,17 @@ int main(void){
           }
           if (!line_active && AddTrack1_read) {
             uint16_t track1_write_addr = next_card_addr + NICKNAME_LEN;
+
+            if (add_track1[0] == '%') {
+              track1_UART_decode(add_track1);
+            }
+
+
             EEPROM_WriteBuffer(track1_write_addr, add_track1, TRACK1_LEN);
             UART_state = AddTrack2;
 
             AddTrack1_read = 0;
-              
+
           }
 
           break;
@@ -406,24 +433,31 @@ int main(void){
 
           if (!line_active && !AddTrack2_read){
             next_card_addr = FIRST_BLOCK_ADDR + num_cards*CARD_DATA_SIZE;
-            
+
 
             UART_send(ClearScreen);
             UART_send(CursorHome);
             UART_send("Enter Track 2 data: ");
             readLine(add_track2, TRACK2_LEN, &AddTrack2_read);
           }
-          
+
           if(!line_active && AddTrack2_read){
             uint16_t track2_write_addr = next_card_addr + NICKNAME_LEN + TRACK1_LEN;
+            
+            for (int i = 0; i < TRACK2_LEN; i++) {
+              if (add_track2[i] == ';') {
+                track2_UART_decode(add_track2);
+                break;
+              }
+            }
+
             EEPROM_WriteBuffer(track2_write_addr, add_track2, TRACK2_LEN);
             EEPROM_WriteByte(NUM_CARDS_ADDR, num_cards + 1);
 
             num_cards++;
 
             UART_send("Card saved.\r\n");
-            HAL_Delay(MENU_WAIT);
-            sTimer[MENU_WAIT_TIMER]=MENU_WAIT_TIME;
+            sTimer[MENU_WAIT_TIMER] = MENU_WAIT_TIME;
             UART_state = ViewNicknames;
 
             AddTrack2_read = 0;
@@ -434,7 +468,11 @@ int main(void){
 
         case ViewNicknames: {
           static int ViewNicknames_read = 0;
-          
+          if (num_cards == 0) {
+            UART_state = NoCards;
+            break;
+          }
+
           if (!line_active && !ViewNicknames_read) {
             EEPROM_ReadByte(NUM_CARDS_ADDR, &num_cards);
             for (int i = 0; i < num_cards && i < MAX_NUM_CARDS; i++) {
@@ -445,6 +483,7 @@ int main(void){
             UART_send(CursorHome);
 
             if (num_cards > 0) {
+              new_LCD_state = 1;
               UART_send("What would you like to do?\n\r");
               UART_send("Add card (A),\n\r");
               UART_send("Edit card (digit)\n\r\n\r");
@@ -473,14 +512,14 @@ int main(void){
           if (!line_active && ViewNicknames_read) {
             if (choice >= '0' && choice <= '9'){
               card_choice = choice - '0';
-              
+
               if (card_choice < num_cards) {
                 UART_state = ViewCard;
               } else {
                 UART_state = ViewNicknames;
               }
-              
-            } else if (choice == 'A' || choice == 'a') {
+
+            } else if (choice == 'A' || choice == 'a' && num_cards < MAX_NUM_CARDS) {
               UART_state = AddNickname;
             } else if (choice == '`') {
               EEPROM_WriteByte(NUM_CARDS_ADDR, 0);
@@ -492,30 +531,34 @@ int main(void){
             } else {
               UART_state = ViewNicknames;
             }
-            
+
             ViewNicknames_read = 0;
           }
-            
+
           break;
         }
-        
+
         case NoCards: {
           static int NoCards_read=0;
-          
+          static char NoCardsChoice;
+
+
           if(!line_active && !NoCards_read){
+            new_LCD_state = 1;
+            UART_send(ClearScreen);
+            UART_send(CursorHome);
             UART_send("Press 'A' to add a card.\n\r\n\r");
             UART_send("> ");
 
-            readChar(&choice, &NoCards_read);
+            NoCardsChoice = '\0';
+            readChar(&NoCardsChoice, &NoCards_read);
           }
-          
-          if(!line_active && NoCards_read){
-            if (choice == 'A' || choice =='a') {
+
+          if(!line_active && NoCardsChoice){
+            if (NoCardsChoice == 'A' || NoCardsChoice =='a') {
               UART_state = AddNickname;
-              break;
             } else {
               UART_state = NoCards;
-              break;
             }
 
             NoCards_read = 0;
@@ -561,7 +604,7 @@ int main(void){
             readChar(&choice, &ViewCard_read);
 
           }
-          
+
           if(!line_active && ViewCard_read){
             if (choice == '0') {
             UART_state = EditNickname;
@@ -584,7 +627,7 @@ int main(void){
         case SureDelete: {
           static int SureDelete_read=0;
           static char delete_choice;
-          
+
           if(!line_active && !SureDelete_read){
             UART_send(ClearScreen);
             UART_send(CursorHome);
@@ -599,9 +642,11 @@ int main(void){
             if (delete_choice == 'y' || delete_choice == 'Y') {
               UART_send("\r\n\r\nDeleting Card ");
               delete_card(card_choice);
+              EEPROM_ReadByte(NUM_CARDS_ADDR, &num_cards);
+
               UART_send("\r\nCard deleted.");
               sTimer[MENU_WAIT_TIMER] = MENU_WAIT_TIME;
-              
+
               SureDelete_read = 0;
               UART_state = ViewNicknames;
             }
@@ -618,7 +663,7 @@ int main(void){
             UART_send(ClearScreen);
             UART_send(CursorHome);
             //ask user for new input and save that input through eeprom
-            
+
             UART_send("Enter a new nickname: ");
             readLine(new_nickname, NICKNAME_LEN, &EditNickname_read);
           }
@@ -641,20 +686,20 @@ int main(void){
           if(!line_active && !EditTrack1_read){
             UART_send(ClearScreen);
             UART_send(CursorHome);
-          
+
             UART_send("Enter new track1 data: ");
             readLine(new_track1,TRACK1_LEN,&EditTrack1_read);
           }
-          
+
           if(!line_active && EditTrack1_read){
           EEPROM_WriteBuffer(FIRST_BLOCK_ADDR + card_choice*CARD_DATA_SIZE + NICKNAME_LEN, new_track1, TRACK1_LEN);
           UART_send("Track 1 saved.");
           sTimer[MENU_WAIT_TIMER] = MENU_WAIT_TIME;
           UART_state = ViewNicknames;
-            
+
           EditTrack1_read = 0;
           }
-          
+
 
           break;
         }
@@ -666,7 +711,7 @@ int main(void){
           if (!line_active && !EditTrack2_read) {
             UART_send(ClearScreen);
             UART_send(CursorHome);
-          
+
             UART_send("Enter a new Track 2: ");
             readLine(new_track2, TRACK2_LEN,&EditTrack2_read);
           }
@@ -678,7 +723,7 @@ int main(void){
             UART_state = ViewNicknames;
             EditTrack2_read = 0;
           }
-        
+
           break;
         }
 
@@ -748,68 +793,92 @@ int main(void){
     LCD_index = 0;
   }
 
+
   // NOTE:
   // MAKE SURE TO INIT AND CLEAR LCD BEFORE WHILE LOOP
   switch (LCD_state) {
     case NoNicknames: {
-      LcdGoto(0, 0);
-      LcdPutS("No Cards Added");
-      LcdGoto(1, 0);
-      LcdPutS("Add via UART");
-
+      if (new_LCD_state) { 
+        new_LCD_state = 0;
+        LcdClear();
+        LcdGoto(0, 0);
+        LcdPutS("No Cards Added");
+        LcdGoto(1, 0);
+        LcdPutS("Add via UART");
+      }
       if (num_cards != 0) {
+        new_LCD_state = 1;
         LCD_state = ShowNickname;
       }
     }
 
     case ShowNickname: {
-      if (Nucleo_button_pushed_verbose()){
-        LcdGoto(0, 0);
-        LcdPutS(LCD_NICKNAME_LINE);
+        if (new_LCD_state) {
+          
+          if (num_cards == 0) {
+            LCD_state = NoNicknames;
+            break;
+          }
 
-        LcdGoto(1, 0);
-        LcdPutS(nicknames[LCD_index]);
+          for (int i = 0; i < num_cards && i < MAX_NUM_CARDS; i++) {
+            EEPROM_ReadBuffer(FIRST_BLOCK_ADDR + CARD_DATA_SIZE*i, nicknames[i], NICKNAME_LEN);
+          }
+
+
+          new_LCD_state = 0;
+          LcdClear();
+          LcdGoto(0, 0);
+          LcdPutS(LCD_NICKNAME_LINE);
+          
+          LcdGoto(1, 0);
+          LcdPutS(nicknames[LCD_index]);
+        }
+
 
         // Check for button press type (activate on release);
-        if (Nucleo_button_pushed_verbose()) {
-          if (sTimer[BUTTON_HOLD_TIMER] > BUTTON_HOLD1_TIME) {
-            // Short press
-            if (LCD_index == num_cards) {
+        if (Blue_Debounce()) {
+            if (LCD_index == num_cards - 1) {
               LCD_index = 0;
             } else {
               LCD_index++;
             }
+            new_LCD_state = 1;
             LCD_state = ShowNickname;
-
-          } else if (sTimer[BUTTON_HOLD_TIMER] < BUTTON_HOLD1_TIME && sTimer[BUTTON_HOLD_TIMER] > 0)  {
-            // Long press 1
-            LCD_state = SendTrack1;
-          } else {
-            // Long press 2
-            LCD_state = SendTrack2;
-          }
+        } else if (Track1_Debounce()) {
+          new_LCD_state = 1;
+          LCD_state = SendTrack1;
+        } else if (Track2_Debounce()) {
+          new_LCD_state = 1;
+          LCD_state = SendTrack2;
         }
-      }
+      
       break;
     }
 
     case SendTrack1: {
       uint16_t LCD_block_addr = FIRST_BLOCK_ADDR + CARD_DATA_SIZE*LCD_index;
       char LCD_track1[TRACK1_LEN];
-      
+
       EEPROM_ReadBuffer(LCD_block_addr + NICKNAME_LEN, LCD_track1, TRACK1_LEN);
 
+      LcdClear();
       LcdGoto(0,0);
       LcdPutS("Sending Track 1");
-      
+
+      //UART_send(LCD_track1);
+
+     // char temp_str2[] = "%2015051662854STUDENT?";
+      //char temp_str2[] = "%HELLO WORLDS?";
+
       init_track(0, LCD_track1);
       transmit_track_one();
 
       HAL_Delay(500);
+      LcdClear();
       LcdGoto(0,0);
       LcdPutS("Track 1 Sent.");
-      HAL_Delay(MENU_WAIT);
-      
+      HAL_Delay(MENU_WAIT / 5);
+
       LCD_state = ShowNickname;
       break;
     }
@@ -817,25 +886,76 @@ int main(void){
     case SendTrack2:{
       char LCD_track2[TRACK2_LEN];
       uint16_t LCD_block_addr = FIRST_BLOCK_ADDR + CARD_DATA_SIZE*LCD_index;
-      
-      EEPROM_ReadBuffer(LCD_block_addr + NICKNAME_LEN + TRACK1_LEN, LCD_track2, TRACK2_LEN);
 
+      EEPROM_ReadBuffer(LCD_block_addr + NICKNAME_LEN + TRACK1_LEN, LCD_track2, TRACK2_LEN);
+      LcdClear();
       LcdGoto(0,0);
       LcdPutS("Sending Track 2");
 
-      init_track(1,LCD_track2);
+      //UART_send(LCD_track2);
+
+      //char temp_str[] = ";123456789?";
+
+      init_track(1, LCD_track2);
       transmit_track_two();
 
       HAL_Delay(500);
+      LcdClear();
       LcdGoto(0,0);
       LcdPutS("Track 2 Sent");
-      HAL_Delay(MENU_WAIT);
+      HAL_Delay(MENU_WAIT / 5);
 
       LCD_state = ShowNickname;
       break;
     }
   }
 }
+}
+
+void track1_UART_decode(char* track_in) {
+  int end_reached = 0;
+  for (int i = 0; i < TRACK1_LEN; i++) {
+    if (end_reached) {
+      track_in[i] = '\0';
+    }
+    if (track_in[i] == '?') {
+      end_reached = 1;
+    }
+  }
+}
+
+
+
+void track2_UART_decode(char* track_in){
+  int end_reached=0;
+  int start_reached = 0;
+  char temp[TRACK2_LEN];
+  int index2 = 0;
+  
+  for (int i = 0; i < TRACK2_LEN; i++) {
+    if (track_in[i] == ';') {
+      start_reached = 1;
+    }
+
+    if (start_reached==1){
+      temp[index2] = track_in[i];
+      if (end_reached) {
+        temp[index2] = '\0';
+        break;
+      }
+
+      if(track_in[i]=='?'){
+        end_reached=1;
+      } 
+      index2++;
+    }
+
+  }
+  int j = 0;
+  for (; j < index2+1; j++) {
+    track_in[j] = temp[j];
+  }
+  track_in[j + 1] = '\0';
 }
 
 void delete_card(int card) {
@@ -877,18 +997,25 @@ void delete_card(int card) {
 
 }
 
-
-
-bool Nucleo_button_pressed(){
+bool blue_button_pressed(){
 	return 	(HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != PUSHED);
 }
-bool Nucleo_button_pushed_verbose(){
+
+bool track1_button_pressed(){
+	return 	(HAL_GPIO_ReadPin(TRACK1_BUT_PORT, TRACK1_BUT_PIN) != PUSHED);
+}
+
+bool track2_button_pressed(){
+	return 	(HAL_GPIO_ReadPin(TRACK2_BUT_PORT, TRACK2_BUT_PIN) != PUSHED);
+}
+
+bool Blue_Debounce(){
 	static button_state_t state = PUSHED;
 	bool take_action = false;
 
 	switch(state){
 		case PUSHED:
-			if(!Nucleo_button_pressed()){
+			if(!blue_button_pressed()){
 				state=P2R;
 				take_action=false;
 			}else{
@@ -898,11 +1025,10 @@ bool Nucleo_button_pushed_verbose(){
 			break;
 
 		case P2R:
-			if(!Nucleo_button_pressed()){
+			if(!blue_button_pressed()){
 				state=RELEASED;
-				take_action=true;
-				long_press = false;
-			}else{
+				take_action=false;
+			} else {
 				state=PUSHED;
 				take_action=false;
 			}
@@ -910,21 +1036,121 @@ bool Nucleo_button_pushed_verbose(){
 
 
 		case RELEASED:
-			if(Nucleo_button_pressed()){
+			if(blue_button_pressed()){
 				state=R2P;
 				take_action=false;
 			}else{
 				state=RELEASED;
 				take_action=false;
-				long_press = false;
 			}
 			break;
 
 		case R2P:
-			if(Nucleo_button_pressed()){
+			if(blue_button_pressed()){
+				state=PUSHED;
+				take_action=true;
+			}else{
+				state=RELEASED;
+				take_action=false;
+			}
+			break;
+
+	}
+	return take_action;
+
+}
+
+bool Track1_Debounce(){
+	static button_state_t state = PUSHED;
+	bool take_action = false;
+
+	switch(state){
+		case PUSHED:
+			if(!track1_button_pressed()){
+				state=P2R;
+				take_action=false;
+			}else{
 				state=PUSHED;
 				take_action=false;
-				sTimer[BUTTON_HOLD_TIMER] = BUTTON_HOLD2_TIME;
+			}
+			break;
+
+		case P2R:
+			if(!track1_button_pressed()){
+				state=RELEASED;
+				take_action=false;
+			} else {
+				state=PUSHED;
+				take_action=false;
+			}
+			break;
+
+
+		case RELEASED:
+			if(track1_button_pressed()){
+				state=R2P;
+				take_action=false;
+			}else{
+				state=RELEASED;
+				take_action=false;
+			}
+			break;
+
+		case R2P:
+			if(track1_button_pressed()){
+				state=PUSHED;
+				take_action=true;
+			}else{
+				state=RELEASED;
+				take_action=false;
+			}
+			break;
+
+	}
+	return take_action;
+
+}
+
+bool Track2_Debounce(){
+	static button_state_t state = PUSHED;
+	bool take_action = false;
+
+	switch(state){
+		case PUSHED:
+			if(!track2_button_pressed()){
+				state=P2R;
+				take_action=false;
+			}else{
+				state=PUSHED;
+				take_action=false;
+			}
+			break;
+
+		case P2R:
+			if(!track2_button_pressed()){
+				state=RELEASED;
+				take_action=false;
+			} else {
+				state=PUSHED;
+				take_action=false;
+			}
+			break;
+
+
+		case RELEASED:
+			if(track2_button_pressed()){
+				state=R2P;
+				take_action=false;
+			}else{
+				state=RELEASED;
+				take_action=false;
+			}
+			break;
+
+		case R2P:
+			if(track2_button_pressed()){
+				state=PUSHED;
+				take_action=true;
 			}else{
 				state=RELEASED;
 				take_action=false;
@@ -1089,6 +1315,7 @@ HAL_StatusTypeDef EEPROM_ReadBuffer(uint16_t memAddress, uint8_t *pBuffer, uint1
     );
     return status;
 }
+
 /**
   * @brief System Clock Configuration
   * @retval None
@@ -1284,8 +1511,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4|GPIO_PIN_8
-                          |GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
@@ -1303,19 +1529,23 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA0 PA1 PA4 PA8
-                           PA9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4|GPIO_PIN_8
-                          |GPIO_PIN_9;
+  /*Configure GPIO pins : PA0 PA1 PA8 PA9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_8|GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /*Configure GPIO pin : PB0 */
   GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PB10 PB3 PB4 PB5

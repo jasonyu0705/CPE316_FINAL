@@ -122,8 +122,10 @@ void send_track(int index) {
         GetFifo(index, Buffer);
         if (Buffer[0] == 0) {
         send_zero(index);
+        //UART_send("0");
         } else {
         send_one(index);
+        //UART_send("1");
         }
     }
     }
@@ -252,7 +254,7 @@ int convert_track_two(char* track, int length) {
 //    return length + 1;
 //}
 
-int appendTrack1LRC(char* codes, int length) {
+int appendTrack1LRC(unsigned char* codes, int length) {
     int cols[6] = {0, 0, 0, 0, 0, 0};
 
     // XOR each column
